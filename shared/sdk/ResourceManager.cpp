@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <spdlog/spdlog.h>
 #include <hde64.h>
 
@@ -17,6 +18,17 @@ decltype(Resource::s_release_fn) Resource::s_release_fn = nullptr;
 
 void Resource::add_ref() {
     ResourceManager::update_pointers();
+
+    // Hmm...
+    if (s_add_ref_fn == nullptr) {
+        if (s_refcount_offset.has_value()) {
+            _InterlockedIncrement((volatile LONG*)((uintptr_t)this + *s_refcount_offset));
+        } else {
+            _InterlockedIncrement((volatile LONG*)((uintptr_t)this + 0x28));
+        }
+        
+        return;
+    }
 
     s_add_ref_fn(this);
 }
@@ -54,12 +66,20 @@ ResourceManager* ResourceManager::get() {
     return (ResourceManager*)sdk::get_native_singleton("via.ResourceManager");
 }
 
+// createresource is called in:
+// via.Folder.activate
+// via.Prefab.duplicate
+// via.Prefab.Clone
+// via.Prefab.set_Path
+// via.prefab.set_Standby
 sdk::Resource* ResourceManager::create_resource(void* type_info, std::wstring_view name) {
     update_pointers();
 
     return s_create_resource_fn(this, type_info, name.data());
 }
 
+// This one is a bit harder but there are a few functions called at the bottom of
+// createResource that are called in create_userdata
 intrusive_ptr<sdk::ManagedObject> ResourceManager::create_userdata(void* type_info, std::wstring_view name) {
     update_pointers();
 
@@ -91,6 +111,8 @@ void ResourceManager::update_pointers() {
             return;
         }
 
+        spdlog::info("[ResourceManager::create_resource] Found string reference at {:x}", *string_reference);
+
         // use HDE to disasm *string_reference - 3 and disasm forward a bit
         // to find a call instruction which is the function we want
         auto ip = *string_reference - 3;
@@ -117,8 +139,11 @@ void ResourceManager::update_pointers() {
             // now find create_userdata, using the previous function as a reference to ignore
             // since they both have the same pattern at the start of the function
             const auto valid_patterns = {
+#if TDB_VER < 73
                 "66 83 F8 40 75 ? C6",
-                "66 83 F8 40 75 ? 48"
+                "66 83 F8 40 75 ? 48",
+#endif
+                "66 41 83 39 40" // DD2+
             };
 
             bool found = false;
@@ -126,7 +151,7 @@ void ResourceManager::update_pointers() {
 
             for (const auto& pat : valid_patterns) {
                 for (auto ref = utility::scan(mod, pat); ref.has_value(); ref = utility::scan(*ref + 1, (mod_end - (*ref + 1)) - 100, pat)) {
-                    auto func = utility::find_function_start(*ref);
+                    auto func = utility::find_function_start_with_call(*ref);
 
                     if (func && *func != (uintptr_t)s_create_resource_fn) {
                         if (std::abs((ptrdiff_t)(*func - (uintptr_t)s_create_resource_fn)) < 0x50) {
@@ -230,5 +255,18 @@ void Resource::update_pointers() {
 
     auto first_call = locate_add_ref_or_release(ResourceManager::s_create_resource_reference + CALL_INSN_SIZE); // first pass finds add_ref or release
     locate_add_ref_or_release(*first_call + CALL_INSN_SIZE); // second pass finds add_ref or release
+
+    if (s_add_ref_fn == nullptr) {
+        const auto first_lock_inc = utility::find_pattern_in_path((uint8_t*)(ResourceManager::s_create_resource_reference + CALL_INSN_SIZE), 15, false, "F0 FF");
+
+        if (first_lock_inc.has_value()) {
+            const auto& ix = first_lock_inc->instrux;
+
+            if (ix.HasLock && ix.Instruction == ND_INS_INC && ix.Operands[0].Type == ND_OP_MEM && ix.Operands[0].Info.Memory.HasBase && ix.Operands[0].Info.Memory.HasDisp) {
+                s_refcount_offset = ix.Operands[0].Info.Memory.Disp;
+                spdlog::info("[Resource::update_pointers] Found refcount offset at {:x}", *s_refcount_offset);
+            }
+        }
+    }
 }
 }

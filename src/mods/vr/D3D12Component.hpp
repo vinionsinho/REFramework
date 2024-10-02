@@ -12,7 +12,7 @@
 #include <../../directxtk12-src/Inc/GraphicsMemory.h>
 #include <../../directxtk12-src/Inc/SpriteBatch.h>
 
-#include "d3d12/ResourceCopier.hpp"
+#include "d3d12/CommandContext.hpp"
 #include "d3d12/TextureContext.hpp"
 
 #define XR_USE_PLATFORM_WIN32
@@ -55,7 +55,8 @@ private:
     ComPtr<ID3D12Resource> m_prev_backbuffer{};
     d3d12::TextureContext m_backbuffer_copy{};
     d3d12::TextureContext m_converted_eye_tex{};
-    std::array<d3d12::ResourceCopier, 3> m_generic_copiers{};
+    std::array<d3d12::CommandContext, 3> m_generic_copiers{};
+    std::array<d3d12::CommandContext, 3> m_backbuffer_copy_commands{};
     
     std::unique_ptr<DirectX::DX12::SpriteBatch> m_sprite_batch{};
 
@@ -75,28 +76,28 @@ private:
 
         d3d12::TextureContext& acquire_left() {
             auto& ctx = get_left();
-            ctx.copier.wait(INFINITE);
+            ctx.commands.wait(INFINITE);
 
             return ctx;
         }
 
         d3d12::TextureContext& acquire_right() {
             auto& ctx = get_right();
-            ctx.copier.wait(INFINITE);
+            ctx.commands.wait(INFINITE);
 
             return ctx;
         }
 
         void copy_left(ID3D12Resource* src, D3D12_RESOURCE_STATES src_state = D3D12_RESOURCE_STATE_PRESENT) {
             auto& ctx = this->acquire_left();
-            ctx.copier.copy(src, ctx.texture.Get(), src_state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-            ctx.copier.execute();
+            ctx.commands.copy(src, ctx.texture.Get(), src_state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            ctx.commands.execute();
         }
 
         void copy_right(ID3D12Resource* src, D3D12_RESOURCE_STATES src_state = D3D12_RESOURCE_STATE_PRESENT) {
             auto& ctx = this->acquire_right();
-            ctx.copier.copy(src, ctx.texture.Get(), src_state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-            ctx.copier.execute();
+            ctx.commands.copy(src, ctx.texture.Get(), src_state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            ctx.commands.execute();
         }
 
         std::array<d3d12::TextureContext, 3> left_eye_tex{};
@@ -109,13 +110,14 @@ private:
         void initialize(XrSessionCreateInfo& session_info);
         std::optional<std::string> create_swapchains();
         void destroy_swapchains();
-        void copy(uint32_t swapchain_idx, ID3D12Resource* src, D3D12_BOX* src_box, D3D12_RESOURCE_STATES src_state);
+        using CopyFn = std::function<void(d3d12::CommandContext& ctx, d3d12::TextureContext& dst, D3D12_RESOURCE_STATES src_state, D3D12_RESOURCE_STATES dst_state)>;
+        void copy(uint32_t swapchain_idx, ID3D12Resource* src, D3D12_BOX* src_box, D3D12_RESOURCE_STATES src_state, CopyFn copy_fn = nullptr);
         void wait_for_all_copies() {
             std::scoped_lock _{this->mtx};
 
             for (auto& ctx : this->contexts) {
                 for (auto& texture_ctx : ctx.texture_contexts) {
-                    texture_ctx->copier.wait(INFINITE);
+                    texture_ctx->commands.wait(INFINITE);
                 }
             }
         }

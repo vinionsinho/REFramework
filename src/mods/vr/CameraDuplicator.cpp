@@ -207,14 +207,10 @@ void CameraDuplicator::clone_camera() {
         return;
     }
 
-    auto old_camera_folder = old_camera_gameobject->folder;
-
-    if (old_camera_folder == nullptr) {
-        return;
-    }
-
     // Setting active to false lets us "activate" the folder again, cloning the camera perfectly
-    constexpr auto ACTIVE_OFFSET = sizeof(::REManagedObject) + 5;
+    // ADDENDUM: We don't do this anymore, and instead opt for manually recreating the components
+    // as it causes a bunch of issues like the game thinks the new camera is the main one and other things.
+    //constexpr auto ACTIVE_OFFSET = sizeof(::REManagedObject) + 5;
     //*(bool*)((uint8_t*)old_camera_folder + ACTIVE_OFFSET) = false;
     //sdk::call_object_func_easy<void*>(old_camera_folder, "activate");
 
@@ -243,18 +239,26 @@ void CameraDuplicator::clone_camera() {
 
     REComponent* component = old_camera_gameobject->transform->childComponent;
 
-    const std::unordered_set<std::string> illegal_components {
-        "app.worldtour.bWTCameraController", // this causes the camera to become the "main" camera which is NOT what we want, it breaks the real main camera
-        "app.ropeway.camera.MainCameraController", // also breaks the real main camera
-        "app.ropeway.camera.CameraSystem", // also breaks the real main camera
-        "app.bPostProcessController",
-        "app.MainCameraDestroyChecker",
+    std::unordered_set<std::string> illegal_components {
         "via.render.ExperimentalRayTrace",
         "via.motion.MotionCamera", // Unnecessarily takes control of the camera transform which we don't want
         "via.motion.ActorMotionCamera", // Unnecessarily takes control of the camera transform which we don't want
         "via.wwise.WwiseListener",
         // todo
     };
+
+    std::unordered_set<std::string> game_framework_components {
+        "worldtour.bWTCameraController", // this causes the camera to become the "main" camera which is NOT what we want, it breaks the real main camera
+        "camera.MainCameraController", // also breaks the real main camera
+        "camera.CameraSystem", // also breaks the real main camera
+        "bPostProcessController",
+        "MainCameraDestroyChecker",
+    };
+
+    // Add new components to illegal_components with the game project name prepended to the game_framework_components
+    for (auto& fwcomp : game_framework_components) {
+        illegal_components.insert(game_namespace((fwcomp)));
+    }
 
     while (component != nullptr) {
         const auto tdef = utility::re_managed_object::get_type_definition(component);
@@ -266,7 +270,7 @@ void CameraDuplicator::clone_camera() {
             continue;
         }
 
-        // 
+        // TODO: other game framework prefixes or maybe app is just okay?
         if (tdef->get_full_name().starts_with("app.")) {
             spdlog::info("Skipping app component {}", tdef->get_full_name());
             component = component->childComponent;
@@ -317,7 +321,7 @@ void CameraDuplicator::hook_get_primary_camera() {
     const auto get_primary_camera_fn = sceneview_t->get_method("get_PrimaryCamera");
     spdlog::info("Hooking getPrimaryCamera: {:x}", (uintptr_t)get_primary_camera_fn);
 
-    g_hookman.add(get_primary_camera_fn, [this](std::vector<uintptr_t>& args, std::vector<sdk::RETypeDefinition*>& arg_tys) {
+    g_hookman.add(get_primary_camera_fn, [this](std::vector<uintptr_t>& args, std::vector<sdk::RETypeDefinition*>& arg_tys, uintptr_t ret_addr) {
         if (m_new_cameras.empty()) {
             return HookManager::PreHookResult::CALL_ORIGINAL;
         }
@@ -332,7 +336,7 @@ void CameraDuplicator::hook_get_primary_camera() {
         
         return HookManager::PreHookResult::CALL_ORIGINAL;
     }, 
-    [this](uintptr_t& ret_val, sdk::RETypeDefinition* ret_ty) {
+    [this](uintptr_t& ret_val, sdk::RETypeDefinition* ret_ty, uintptr_t ret_addr) {
         std::scoped_lock _{ m_camera_mutex };
 
         for (auto new_camera : m_new_cameras) {
@@ -488,15 +492,15 @@ void CameraDuplicator::copy_camera_properties() {
                     const auto result = getter->invoke(old_component, {});
 
                     if (result_type == nullptr) {
-                        setter->invoke(new_component, {result.ptr});
+                        setter->invoke(new_component, result.ptr);
                     } else {
                         if (should_pass_result_ptr) {
-                            setter->invoke(new_component, {(void*)result.bytes.data()});
+                            setter->invoke(new_component, (void*)result.bytes.data());
                         } else {
                             const auto current_value = getter->invoke(new_component, {});
 
                             if (current_value.ptr != result.ptr) {
-                                setter->invoke(new_component, {result.ptr});
+                                setter->invoke(new_component, result.ptr);
                             }
                         }
                     }

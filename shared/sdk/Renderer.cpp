@@ -1,3 +1,5 @@
+#include <algorithm>
+
 #include <spdlog/spdlog.h>
 
 #include <utility/Scan.hpp>
@@ -5,6 +7,7 @@
 
 #include "Application.hpp"
 #include "RETypeDB.hpp"
+#include "RETypes.hpp"
 #include "SceneManager.hpp"
 
 #include "Renderer.hpp"
@@ -309,6 +312,28 @@ RenderLayer* RenderLayer::get_parent() {
     return sdk::call_object_func<RenderLayer*>(this, "get_Parent", sdk::get_thread_context(), this);
 }
 
+void RenderLayer::set_parent(RenderLayer* layer) {
+    static std::optional<uint32_t> offset = std::nullopt;
+
+    if (!offset) {
+        const auto parent = get_parent();
+
+        if (parent != nullptr) {
+            for (auto i = 0; i < 0x100; i += sizeof(void*)) {
+                if (*(RenderLayer**)((uintptr_t)this + i) == parent) {
+                    offset = i;
+                    spdlog::info("[Renderer] Parent offset: {:x}", i);
+                    break;
+                }
+            }
+        }
+    }
+
+    if (offset.has_value()) {
+        *(RenderLayer**)((uintptr_t)this + *offset) = layer;
+    }
+}
+
 RenderLayer* RenderLayer::find_parent(::REType* layer_type) {
     for (auto parent = get_parent(); parent != nullptr; parent = parent->get_parent()) {
         if (parent->info == nullptr || parent->info->classInfo == nullptr) {
@@ -385,6 +410,253 @@ void RenderLayer::clone_layers(RenderLayer* other, bool recursive) {
     return utility::re_managed_object::get_field<::sdk::renderer::TargetState*>(this, name);
 }
 
+void RenderContext::set_pipeline_state(sdk::renderer::PipelineState* pipeline_state) {
+    using Fn = void (*)(RenderContext*, sdk::renderer::PipelineState*);
+    static Fn set_pipeline_state_fn = []() -> Fn {
+        spdlog::info("[RenderContext::set_pipeline_state] Searching for RenderContext::set_pipeline_state");
+
+        const auto game = utility::get_executable();
+        const auto string_data = utility::scan_string(game, "UpdateDepthBlockerState");
+
+        if (!string_data) {
+            spdlog::error("[RenderContext::set_pipeline_state] Failed to find UpdateDepthBlockerState string");
+            return nullptr;
+        }
+
+        const auto string_ref = utility::scan_displacement_reference(game, *string_data);
+
+        if (!string_ref) {
+            spdlog::error("[RenderContext::set_pipeline_state] Failed to find UpdateDepthBlockerState reference");
+            return nullptr;
+        }
+
+        std::optional<uintptr_t> current_function_call{};
+        uintptr_t current_ip{*string_ref + 4};
+
+        // First one is murmur hash calc function
+        // second: MasterMaterialResource::find
+        // third: RenderResource::add_ref
+        // fourth: RenderContext::set_pipeline_state
+        for (size_t i = 0; i < 4; ++i) {
+            current_function_call = utility::scan_mnemonic(current_ip, 100, "CALL");
+
+            if (!current_function_call) {
+                spdlog::error("[RenderContext::set_pipeline_state] Failed to find next CALL instruction");
+                return nullptr;
+            }
+
+            current_ip = *current_function_call + 5;
+        }
+
+        const auto result = utility::resolve_displacement(*current_function_call);
+
+        if (!result) {
+            spdlog::error("[RenderContext::set_pipeline_state] Failed to resolve displacement");
+            return nullptr;
+        }
+
+        spdlog::info("[RenderContext::set_pipeline_state] Found RenderContext::set_pipeline_state at {:x}", *result);
+
+        return (Fn)*result;
+    }();
+
+    if (set_pipeline_state_fn == nullptr) {
+        return;
+    }
+
+    set_pipeline_state_fn(this, pipeline_state);
+}
+
+void RenderContext::dispatch_ray(uint32_t tgx, uint32_t tgy, uint32_t tgz, Fence& fence) {
+    using Fn = void (*)(RenderContext*, uint32_t, uint32_t, uint32_t, Fence*);
+    static auto func = []() -> Fn {
+        spdlog::info("[RenderContext::dispatch_ray] Searching for RenderContext::dispatch_ray");
+
+        const auto game = utility::get_executable();
+        const auto string_data = utility::scan_string(game, "PathSpaceRayTracing");
+
+        if (!string_data) {
+            spdlog::error("[RenderContext::dispatch_ray] Failed to find PathSpaceRayTracing string");
+            return nullptr;
+        }
+
+        const auto string_ref = utility::scan_displacement_reference(game, *string_data);
+
+        if (!string_ref) {
+            spdlog::error("[RenderContext::dispatch_ray] Failed to find PathSpaceRayTracing reference");
+            return nullptr;
+        }
+
+        std::optional<uintptr_t> current_function_call{};
+        uintptr_t current_ip{*string_ref + 4};
+
+        // First one is murmur hash calc function
+        // second: MasterMaterialResource::find
+        // third: RenderResource::add_ref
+        // fourth: RenderContext::set_pipeline_state
+        // fifth: RenderResource::release
+        // sixth: RenderContext::dispatch_ray
+        for (size_t i = 0; i < 6; ++i) {
+            current_function_call = utility::scan_mnemonic(current_ip, 100, "CALL");
+
+            if (!current_function_call) {
+                spdlog::error("[RenderContext::dispatch_ray] Failed to find next CALL instruction");
+                return nullptr;
+            }
+
+            current_ip = *current_function_call + 5;
+        }
+
+        const auto result = utility::resolve_displacement(*current_function_call);
+
+        if (!result) {
+            spdlog::error("[RenderContext::dispatch_ray] Failed to resolve displacement");
+            return nullptr;
+        }
+
+        spdlog::info("[RenderContext::dispatch_ray] Found RenderContext::dispatch_ray at {:x}", *result);
+
+        return (Fn)*result;
+    }();
+
+    if (func == nullptr) {
+        return;
+    }
+
+    func(this, tgx, tgy, tgz, &fence);
+}
+
+void RenderContext::dispatch_32bit_constant(uint32_t tgx, uint32_t tgy, uint32_t tgz, uint32_t constant, bool disable_uav_barrier) {
+    using Fn = void (*)(RenderContext*, uint32_t, uint32_t, uint32_t, uint32_t, bool);
+    static auto func = []() -> Fn {
+        spdlog::info("[RenderContext::dispatch_32bit_constant] Searching for RenderContext::dispatch_32bit_constant");
+
+        const auto game = utility::get_executable();
+        const auto string_data = utility::scan_string(game, "ClearDepthBlockerState");
+
+        if (!string_data) {
+            spdlog::error("[RenderContext::dispatch_32bit_constant] Failed to find ClearDepthBlockerState string");
+            return nullptr;
+        }
+
+        const auto string_ref = utility::scan_displacement_reference(game, *string_data);
+
+        if (!string_ref) {
+            spdlog::error("[RenderContext::dispatch_32bit_constant] Failed to find ClearDepthBlockerState reference");
+            return nullptr;
+        }
+
+        std::optional<uintptr_t> current_function_call{};
+        uintptr_t current_ip{*string_ref + 4};
+
+        // First one is murmur hash calc function
+        // second: MasterMaterialResource::find
+        // third: RenderResource::add_ref
+        // fourth: RenderContext::set_pipeline_state
+        // fifth: RenderResource::release
+        // sixth: RenderContext::dispatch_32bit_constant
+        for (size_t i = 0; i < 6; ++i) {
+            current_function_call = utility::scan_mnemonic(current_ip, 100, "CALL");
+
+            if (!current_function_call) {
+                spdlog::error("[RenderContext::dispatch_32bit_constant] Failed to find next CALL instruction");
+                return nullptr;
+            }
+
+            current_ip = *current_function_call + 5;
+        }
+
+        const auto result = utility::resolve_displacement(*current_function_call);
+
+        if (!result) {
+            spdlog::error("[RenderContext::dispatch_32bit_constant] Failed to resolve displacement");
+            return nullptr;
+        }
+
+        spdlog::info("[RenderContext::dispatch_32bit_constant] Found RenderContext::dispatch_32bit_constant at {:x}", *result);
+
+        return (Fn)*result;
+    }();
+
+    if (func == nullptr) {
+        return;
+    }
+
+    func(this, tgx, tgy, tgz, constant, disable_uav_barrier);
+}
+
+void RenderContext::dispatch(uint32_t tgx, uint32_t tgy, uint32_t tgz, bool disable_uav_barrier) {
+    using Fn = void (*)(RenderContext*, uint32_t, uint32_t, uint32_t, bool);
+    static auto func = []() -> Fn {
+        spdlog::info("[RenderContext::dispatch] Searching for RenderContext::dispatch");
+
+        const auto game = utility::get_executable();
+        std::optional<uintptr_t> string_data{};
+        const auto all_strings = utility::scan_strings(game, "Reconstruct", true); // part of path space filter routine
+
+        if (all_strings.empty()) {
+            spdlog::error("[RenderContext::dispatch] Failed to find Reconstruct strings");
+            return nullptr;
+        }
+
+        for (const auto& str : all_strings) {
+            if (*(uint8_t*)(str - 1) == 0) { // Makes sure this string is standalone and not in the middle of another string
+                string_data = str;
+                break;
+            }
+        }
+
+        if (!string_data) {
+            spdlog::error("[RenderContext::dispatch] Failed to find correct Reconstruct string");
+            return nullptr;
+        }
+
+        const auto string_ref = utility::scan_displacement_reference(game, *string_data);
+
+        if (!string_ref) {
+            spdlog::error("[RenderContext::dispatch] Failed to find Reconstruct reference");
+            return nullptr;
+        }
+
+        std::optional<uintptr_t> current_function_call{};
+        uintptr_t current_ip{*string_ref + 4};
+
+        // First one is murmur hash calc function
+        // second: MasterMaterialResource::find
+        // third: RenderResource::add_ref
+        // fourth: RenderContext::set_pipeline_state
+        // fifth: RenderResource::release
+        // sixth: RenderContext::dispatch
+        for (size_t i = 0; i < 6; ++i) {
+            current_function_call = utility::scan_mnemonic(current_ip, 100, "CALL");
+
+            if (!current_function_call) {
+                spdlog::error("[RenderContext::dispatch] Failed to find next CALL instruction");
+                return nullptr;
+            }
+
+            current_ip = *current_function_call + 5;
+        }
+
+        const auto result = utility::resolve_displacement(*current_function_call);
+
+        if (!result) {
+            spdlog::error("[RenderContext::dispatch] Failed to resolve displacement");
+            return nullptr;
+        }
+
+        spdlog::info("[RenderContext::dispatch] Found RenderContext::dispatch at {:x}", *result);
+
+        return (Fn)*result;
+    }();
+
+    if (func == nullptr) {
+        return;
+    }
+
+    func(this, tgx, tgy, tgz, disable_uav_barrier);
+}
+
 sdk::renderer::command::Base* RenderContext::alloc(uint32_t t, uint32_t size) {
     // I am just being very lazy right now and just using a pattern instead of 
     // using copy_texture and scanning through the function for the first call
@@ -392,7 +664,7 @@ sdk::renderer::command::Base* RenderContext::alloc(uint32_t t, uint32_t size) {
         spdlog::info("Searching for RenderContext::alloc");
 
         const auto game = utility::get_executable();
-        const auto scan_result = utility::scan(game, "48 8b d9 44 8d 42 38 e8 ? ? ? ?");
+        const auto scan_result = utility::scan(game, "48 8b ? 44 8d 42 38 e8 ? ? ? ?");
 
         if (!scan_result) {
             spdlog::error("Failed to find RenderContext::alloc");
@@ -462,11 +734,42 @@ void RenderContext::clear_rtv(sdk::renderer::RenderTargetView* rtv, float color[
 - 0xD InterleaveNormalDepthHalfWithoutGBuffer
 */
 void RenderContext::copy_texture(Texture* dest, Texture* src, Fence& fence) {
+    // Okay it was actually this simple in older games but it isn't anymore in DD2+
+    // There's some extra garbage going on that I don't want to deal with right now
+    // so will just call the function directly
+/*#if TDB_VER >= 73
+    static const auto copy_texture_typeid = sdk::get_enum_value<uint32_t>("via.render.command.TypeId", "CopyTexture");
+    auto new_command = (command::CopyTexture*)alloc(copy_texture_typeid, sizeof(command::CopyTexture));
+
+    if (new_command != nullptr) {
+        const auto protect_frame = get_protect_frame();
+
+        if (dest->m_render_frame != protect_frame) {
+            dest->m_render_frame = protect_frame;
+        }
+
+        if (src->m_render_frame != protect_frame) {
+            src->m_render_frame = protect_frame;
+        }
+
+        new_command->dst = dest;
+        new_command->src = src;
+        new_command->fence = fence;
+        new_command->dst_subresource = -1;
+        new_command->src_subresource = -1;
+    }
+    
+    return;
+#else*/
     static auto func = []() -> void (*)(RenderContext*, Texture*, Texture*, Fence&) {
         spdlog::info("Searching for RenderContext::copy_texture");
 
         std::vector<std::string> string_choices {
+            // CopyTexture isn't directly behind InterleaveNormalDepthHalfWithoutGBuffer in DD2+
+#if TDB_VER < 73
             "InterleaveNormalDepthHalfWithoutGBuffer",
+#endif
+            "opyImage", // Engine has a weird optimization sometimes where it starts from the +1 offset
             "CopyImage",
         };
 
@@ -516,6 +819,18 @@ void RenderContext::copy_texture(Texture* dest, Texture* src, Fence& fence) {
     }();
 
     func(this, dest, src, fence);
+//#endif
+}
+
+std::optional<uint32_t> Renderer::get_render_frame() const {
+    static auto tdef = sdk::find_type_definition("via.render.Renderer");
+    static auto m = tdef != nullptr ? tdef->get_method("get_RenderFrame") : nullptr;
+
+    if (m == nullptr) {
+        return std::nullopt;
+    }
+
+    return m->call<uint32_t>(sdk::get_thread_context(), this);
 }
 
 ConstantBuffer* Renderer::get_constant_buffer(std::string_view name) const {
@@ -969,7 +1284,8 @@ Texture* create_texture(Texture::Desc* desc) {
         return nullptr;
     }();
 
-    return fn(nullptr, desc);
+    static auto renderer = sdk::renderer::get_renderer();
+    return fn(renderer->get_device(), desc);
 }
 
 /*
@@ -1101,6 +1417,59 @@ sdk::intrusive_ptr<RenderTargetView> RenderTargetView::clone(uint32_t new_width,
     }
 
     return sdk::renderer::create_render_target_view(tex->clone(new_width, new_height), &get_desc());
+}
+
+namespace detail {
+#if TDB_VER >= 71
+#if defined(SF6) || defined(DD2)
+    constexpr auto rtv_size = 0x98;
+#else
+    constexpr auto rtv_size = 0x98 - sizeof(void*);
+#endif
+#elif TDB_VER == 70
+    constexpr auto rtv_size = 0x90 - sizeof(void*);
+#elif TDB_VER == 69
+    constexpr auto rtv_size = 0x88 - sizeof(void*);
+#elif TDB_VER <= 67
+// TODO: 66 and below
+    constexpr auto rtv_size = 0x88 - sizeof(void*);
+#endif
+}
+
+sdk::intrusive_ptr<Texture>& RenderTargetView::get_texture_d3d12() const {
+    // The via.render.RenderTargetView is not part of the normal TDB... I think.
+    static const auto rtv_type = reframework::get_types()->get("via.render.RenderTargetView");
+
+    // The texture and target state members are always at the very start of the RenderTargetViewDX12 structure
+    // so we can very easily automate it like this, otherwise we fall back to the hardcoded offset
+    if (rtv_type != nullptr && rtv_type->size > 0 && rtv_type->size < 0x1000) {
+        const auto rtv_size = rtv_type->size;
+
+#if TDB_VER < 73
+        return *(sdk::intrusive_ptr<Texture>*)((uintptr_t)this + rtv_size + sizeof(void*));
+#else
+        return *(sdk::intrusive_ptr<Texture>*)((uintptr_t)this + rtv_size + (sizeof(void*) * 3));
+#endif
+    }
+    
+#if TDB_VER < 73
+    return *(sdk::intrusive_ptr<Texture>*)((uintptr_t)this + detail::rtv_size + sizeof(void*));
+#else
+    return *(sdk::intrusive_ptr<Texture>*)((uintptr_t)this + detail::rtv_size + (sizeof(void*) * 3));
+#endif
+}
+
+sdk::intrusive_ptr<TargetState>& RenderTargetView::get_target_state_d3d12() const {
+    // The via.render.RenderTargetView is not part of the normal TDB... I think.
+    static const auto rtv_type = reframework::get_types()->get("via.render.RenderTargetView");
+
+    if (rtv_type != nullptr && rtv_type->size > 0 && rtv_type->size < 0x1000) {
+        const auto rtv_size = rtv_type->size;
+
+        return *(sdk::intrusive_ptr<TargetState>*)((uintptr_t)this + rtv_size);
+    }
+    
+    return *(sdk::intrusive_ptr<TargetState>*)((uintptr_t)this + detail::rtv_size);
 }
 
 sdk::intrusive_ptr<TargetState> TargetState::clone() const {
@@ -1266,10 +1635,13 @@ RECamera* layer::Scene::get_main_camera_if_possible() const {
     static const std::vector<std::wstring> camera_names = {
         L"MainCamera",
         L"Main Camera",
+        L"GameCamera", // DMC5
         L"ess_DefaultCamera",
         L"ess_DefaultCamera_01",
         L"WTMainCamera",
-        L"DefaultCamera"
+        L"DefaultCamera",
+        L"Camera_mainmenu",
+        L"Camera_cp7mainmenu",
     };
 
     for (const auto& camera_name : camera_names) {

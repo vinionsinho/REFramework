@@ -45,7 +45,7 @@ public:
     std::string_view get_name() const override { return "VR"; }
 
     // Called when the mod is initialized
-    std::optional<std::string> on_initialize() override;
+    std::optional<std::string> on_initialize_d3d_thread() override;
 
     void on_lua_state_created(sol::state& lua) override;
 
@@ -251,8 +251,8 @@ private:
     static Matrix4x4f* gui_camera_get_projection_matrix_hook(REManagedObject* camera, Matrix4x4f* result);
     void on_camera_get_view_matrix(REManagedObject* camera, Matrix4x4f* result) override;
     
-    static HookManager::PreHookResult pre_set_hdr_mode(std::vector<uintptr_t>& args, std::vector<sdk::RETypeDefinition*>& arg_tys);
-    static void post_set_hdr_mode(uintptr_t& ret_val, sdk::RETypeDefinition* ret_ty) {}
+    static HookManager::PreHookResult pre_set_hdr_mode(std::vector<uintptr_t>& args, std::vector<sdk::RETypeDefinition*>& arg_tys, uintptr_t ret_addr);
+    static void post_set_hdr_mode(uintptr_t& ret_val, sdk::RETypeDefinition* ret_ty, uintptr_t ret_addr) {}
 
     bool on_pre_overlay_layer_update(sdk::renderer::layer::Overlay* layer, void* render_context) override;
     bool on_pre_overlay_layer_draw(sdk::renderer::layer::Overlay* layer, void* render_context) override;
@@ -494,6 +494,7 @@ private:
     template <typename T> using ComPtr = Microsoft::WRL::ComPtr<T>;
 
     struct MultiPass {
+        std::array<d3d12::TextureContext, 2> eye_contexts{}; // For the SRV
         std::array<ComPtr<ID3D12Resource>, 2> eye_textures{};
         std::array<sdk::intrusive_ptr<sdk::renderer::Texture>, 2> native_res_copies{}; // used with TemporalUpscaler disabled
         std::array<uint32_t, 2> allocated_size{};
@@ -601,7 +602,12 @@ private:
     const ModToggle::Ptr m_allow_engine_overlays{ ModToggle::create(generate_name("AllowEngineOverlays"), true) };
     const ModToggle::Ptr m_desktop_fix{ ModToggle::create(generate_name("DesktopRecordingFix"), true) };
     const ModToggle::Ptr m_desktop_fix_skip_present{ ModToggle::create(generate_name("DesktopRecordingFixSkipPresent"), true) };
-    const ModToggle::Ptr m_enable_asynchronous_rendering{ ModToggle::create(generate_name("AsyncRendering_V2"), true) };
+
+#if TDB_VER >= 73
+    const ModToggle::Ptr m_enable_asynchronous_rendering{ ModToggle::create(generate_name("AsyncRendering_V3"), false) };
+#else
+    const ModToggle::Ptr m_enable_asynchronous_rendering{ ModToggle::create(generate_name("AsyncRendering_V3"), true) };
+#endif
 
     bool m_disable_projection_matrix_override{ false };
     bool m_disable_gui_camera_projection_matrix_override{ false };

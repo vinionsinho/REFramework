@@ -7,7 +7,7 @@
 #endif
 
 #define REFRAMEWORK_PLUGIN_VERSION_MAJOR 1
-#define REFRAMEWORK_PLUGIN_VERSION_MINOR 6
+#define REFRAMEWORK_PLUGIN_VERSION_MINOR 10
 #define REFRAMEWORK_PLUGIN_VERSION_PATCH 0
 
 #define REFRAMEWORK_RENDERER_D3D11 0
@@ -35,6 +35,15 @@ typedef void (*REFOnPostApplicationEntryCb)();
 typedef void (*REFOnDeviceResetCb)();
 typedef bool (*REFOnMessageCb)(void*, unsigned int, unsigned long long, long long);
 
+typedef struct {
+    void* context;
+    void* malloc_fn;
+    void* free_fn;
+    void* user_data;
+} REFImGuiFrameCbData;
+typedef void (*REFOnImGuiFrameCb)(REFImGuiFrameCbData*);
+typedef void (*REFOnImGuiDrawUICb)(REFImGuiFrameCbData*);
+
 typedef struct lua_State* (*REFCreateScriptState)();
 typedef void (*REFDeleteScriptState)(struct lua_State*);
 
@@ -48,7 +57,8 @@ typedef void (*REFLuaLockUnlockFn)();
 typedef bool (*REFOnDeviceResetFn)(REFOnDeviceResetCb);
 typedef bool (*REFOnMessageFn)(REFOnMessageCb);
 
-
+typedef bool (*REFOnImGuiFrameFn)(REFOnImGuiFrameCb);
+typedef bool (*REFOnImGuiDrawUIFn)(REFOnImGuiDrawUICb);
 
 typedef struct {
     int major;
@@ -75,6 +85,9 @@ typedef struct {
     bool (*is_drawing_ui)();
     REFCreateScriptState create_script_state;
     REFDeleteScriptState delete_script_state;
+
+    REFOnImGuiFrameFn on_imgui_frame;
+    REFOnImGuiDrawUIFn on_imgui_draw_ui;
 } REFrameworkPluginFunctions;
 
 typedef struct {
@@ -241,6 +254,8 @@ typedef struct {
 
     void* (*get_init_data)(REFrameworkFieldHandle);
     void* (*get_data_raw)(REFrameworkFieldHandle, void* obj, bool is_value_type);
+
+    unsigned int (*get_index)(REFrameworkFieldHandle);
 } REFrameworkTDBField;
 
 typedef struct {
@@ -344,8 +359,8 @@ typedef struct {
     unsigned int (*get_size)(REFrameworkReflectionPropertyHandle);
 } REFrameworkReflectionProperty;
 
-typedef int (*REFPreHookFn)(int argc, void** argv, REFrameworkTypeDefinitionHandle* arg_tys);
-typedef void (*REFPostHookFn)(void** ret_val, REFrameworkTypeDefinitionHandle ret_ty);
+typedef int (*REFPreHookFn)(int argc, void** argv, REFrameworkTypeDefinitionHandle* arg_tys, unsigned long long ret_addr);
+typedef void (*REFPostHookFn)(void** ret_val, REFrameworkTypeDefinitionHandle ret_ty, unsigned long long ret_addr);
 
 typedef struct {
     REFrameworkTDBHandle (*get_tdb)();

@@ -15,6 +15,9 @@ For newer builds, check out the [Nightly Developer Builds](https://github.com/pr
 
 [VR Troubleshooting/FAQ](https://github.com/praydog/REFramework/wiki/VR-Troubleshooting)
 
+### Proton/Linux
+Add the launch option `WINEDLLOVERRIDES="dinput8.dll=n,b" %command%` to your game through Steam's properties after extraction.
+
 Example game folder: G:\SteamLibrary\steamapps\common\RESIDENT EVIL 2 BIOHAZARD RE2
 
 Supports both DirectX 11 and DirectX 12.
@@ -51,6 +54,10 @@ Supports both DirectX 11 and DirectX 12.
 * Devil May Cry 5
 * Street Fighter 6
 * Monster Hunter Rise
+* Dragon's Dogma 2
+* Ghosts 'n Goblins Resurrection (Using RE8 build)
+* Apollo Justice: Ace Attorney Trilogy (Using DD2 build)
+* Kunitsu-Gami: Path of the Goddess (Using DD2 build)
 
 ## Thanks
 [SkacikPL](https://github.com/SkacikPL) for originally creating the Manual Flashlight mod.

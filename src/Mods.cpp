@@ -14,6 +14,7 @@
 #include "mods/Scene.hpp"
 #include "mods/ScriptRunner.hpp"
 #include "mods/VR.hpp"
+#include "mods/LooseFileLoader.hpp"
 #include "mods/vr/games/RE8VR.hpp"
 #include "mods/TemporalUpscaler.hpp"
 
@@ -22,12 +23,13 @@
 Mods::Mods() {
     m_mods.emplace_back(REFrameworkConfig::get());
 
-#if defined(RE3) || defined(RE8) || defined(MHRISE)
+#if defined(REENGINE_AT)
     m_mods.emplace_back(std::make_unique<IntegrityCheckBypass>());
 #endif
 
 #ifndef BAREBONES
     m_mods.emplace_back(Hooks::get());
+    m_mods.emplace_back(LooseFileLoader::get());
 
     m_mods.emplace_back(VR::get());
     m_mods.emplace_back(TemporalUpscaler::get());
@@ -42,9 +44,9 @@ Mods::Mods() {
 #endif
 #endif
 
-    // All games!!!!
+    // All games!!!
     m_mods.emplace_back(Camera::get());
-    m_mods.emplace_back(std::make_unique<Graphics>());
+    m_mods.emplace_back(Graphics::get());
 
 #if defined(RE2) || defined(RE3) || defined(RE8)
     m_mods.emplace_back(std::make_unique<ManualFlashlight>());
@@ -83,6 +85,35 @@ std::optional<std::string> Mods::on_initialize() const {
     }
 
     utility::Config cfg{ (REFramework::get_persistent_dir() / "re2_fw_config.txt").string() };
+
+    for (auto& mod : m_mods) {
+        spdlog::info("{:s}::on_config_load()", mod->get_name().data());
+        mod->on_config_load(cfg);
+    }
+
+    return std::nullopt;
+}
+
+
+std::optional<std::string> Mods::on_initialize_d3d_thread() const {
+    std::scoped_lock _{g_framework->get_hook_monitor_mutex()};
+
+    utility::Config cfg{ (REFramework::get_persistent_dir() / "re2_fw_config.txt").string() };
+
+    // once here to at least setup the values
+    for (auto& mod : m_mods) {
+        spdlog::info("{:s}::on_config_load()", mod->get_name().data());
+        mod->on_config_load(cfg);
+    }
+
+    for (auto& mod : m_mods) {
+        spdlog::info("{:s}::on_initialize_d3d_thread()", mod->get_name().data());
+
+        if (auto e = mod->on_initialize_d3d_thread(); e != std::nullopt) {
+            spdlog::info("{:s}::on_initialize_d3d_thread() has failed: {:s}", mod->get_name().data(), *e);
+            return e;
+        }
+    }
 
     for (auto& mod : m_mods) {
         spdlog::info("{:s}::on_config_load()", mod->get_name().data());

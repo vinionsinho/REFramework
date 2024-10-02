@@ -23,7 +23,7 @@ Application* Application::get() {
 }
 
 Application::Function* Application::get_functions() {
-    static auto functions_offset = []() -> std::optional<int32_t> {
+    static auto functions_offset = [this]() -> std::optional<int32_t> {
         spdlog::info("Searching for Application::functions offset...");
 
         const auto mod = utility::get_executable();
@@ -43,7 +43,24 @@ Application::Function* Application::get_functions() {
             const auto candidate = *(int32_t*)(*ref + 12) - 8;
 
             // If the offset is aligned to 8 bytes, it's a valid offset.
-            if (((uintptr_t)candidate & (sizeof(void*) - 1)) == 0 && candidate >= 0x400) {
+            if (((uintptr_t)candidate & (sizeof(void*) - 1)) == 0 && candidate >= 0x400 && candidate < 0x5000) {
+                try {
+                    const auto ptr = (Application::Function*)((uintptr_t)this + candidate);
+
+                    if (ptr == nullptr || IsBadReadPtr(ptr, sizeof(Application::Function) * 50)) {
+                        spdlog::info("Skipping invalid Application::functions offset: {:x}", candidate);
+                        continue;
+                    }
+
+                    if (ptr->description == nullptr || IsBadReadPtr(ptr->description, 32)) {
+                        spdlog::info("Skipping invalid Application::functions offset: {:x}", candidate);
+                        continue;
+                    }
+                } catch (...) {
+                    spdlog::info("Skipping invalid Application::functions offset: {:x}", candidate);
+                    continue;
+                }
+
                 spdlog::info("Application::functions offset: {:x}", candidate);
                 return candidate;
             }
@@ -64,13 +81,114 @@ Application::Function* Application::get_functions() {
             const auto candidate = *(int32_t*)(*ref + 10);
 
             // If the offset is aligned to 8 bytes, it's a valid offset.
-            if (((uintptr_t)candidate & (sizeof(void*) - 1)) == 0 && candidate >= 0x400) {
+            if (((uintptr_t)candidate & (sizeof(void*) - 1)) == 0 && candidate >= 0x400 && candidate < 0x5000) {
+                try {
+                    const auto ptr = (Application::Function*)((uintptr_t)this + candidate);
+
+                    if (ptr == nullptr || IsBadReadPtr(ptr, sizeof(Application::Function) * 50)) {
+                        spdlog::info("Skipping invalid Application::functions offset: {:x}", candidate);
+                        continue;
+                    }
+
+                    if (ptr->description == nullptr || IsBadReadPtr(ptr->description, 32)) {
+                        spdlog::info("Skipping invalid Application::functions offset: {:x}", candidate);
+                        continue;
+                    }
+                } catch (...) {
+                    spdlog::info("Skipping invalid Application::functions offset: {:x}", candidate);
+                    continue;
+                }
+
                 spdlog::info("Application::functions offset: {:x}", candidate);
                 return candidate;
             }
 
             spdlog::info("Skipping invalid Application::functions offset: {:x}", candidate);
         }
+
+        bool found_wait_rendering = false;
+        bool found_begin_rendering = false;
+        bool found_end_rendering = false;
+
+        const auto module_entry_enum = sdk::find_type_definition("via.ModuleEntry");
+
+        // screw that lets just bruteforce through the Application object looking for huge
+        // list of valid pointers within the current module
+        for (auto i = 0x100; i < 0x1000; i += sizeof(void*)) try {
+            const auto ptr = (Application::Function*)((uintptr_t)this + i);
+
+            if (ptr == nullptr || IsBadReadPtr(ptr, sizeof(Application::Function) * 50)) {
+                continue;
+            }
+
+            for (auto j = 0; j < 1024; ++j) try {
+                const auto& func = ptr[j];
+
+                if (func.description == nullptr || IsBadReadPtr(func.description, 32)) {
+                    break;
+                }
+
+                if (j == 0 && func.entry == nullptr || IsBadReadPtr(func.entry, sizeof(void*))) {
+                    break; // the first one should always be valid.
+                }
+
+                const auto name = std::string_view{func.description};
+
+                if (j == 0) {
+                    if (module_entry_enum != nullptr) {
+                        if (auto f = sdk::get_native_field<uint16_t>(nullptr, module_entry_enum, name, true); f != nullptr) {
+                            if (*f != func.priority) {
+                                break; // the first one should always be valid.
+                            }
+                        }
+                    } else if (func.priority != 1) {
+                        break; // the first one should always be valid.
+                    }
+                }
+
+                if (name == "WaitRendering") {
+                    if (module_entry_enum != nullptr) {
+                        if (auto f = sdk::get_native_field<uint16_t>(nullptr, module_entry_enum, "WaitRendering", true); f != nullptr) {
+                            if (*f == func.priority) {
+                                found_wait_rendering = true;
+                            }
+                        }
+                    } else {
+                        found_wait_rendering = true;
+                    }
+                } else if (name == "BeginRendering") {
+                    if (module_entry_enum != nullptr) {
+                        if (auto f = sdk::get_native_field<uint16_t>(nullptr, module_entry_enum, "BeginRendering", true); f != nullptr) {
+                            if (*f == func.priority) {
+                                found_begin_rendering = true;
+                            }
+                        }
+                    } else {
+                        found_begin_rendering = true;
+                    }
+                } else if (name == "EndRendering") {
+                    if (module_entry_enum != nullptr) {
+                        if (auto f = sdk::get_native_field<uint16_t>(nullptr, module_entry_enum, "EndRendering", true); f != nullptr) {
+                            if (*f == func.priority) {
+                                found_end_rendering = true;
+                            }
+                        }
+                    } else {
+                        found_end_rendering = true;
+                    }
+                }
+
+                if (found_wait_rendering && found_begin_rendering && found_end_rendering) {
+                    spdlog::info("Application::functions offset: {:x}", i);
+                    return i;
+                }
+            } catch (...) {
+                continue;
+            }
+        } catch(...) {
+            continue;
+        }
+
 
         spdlog::error("Cannot find Application::functions offset.");
 

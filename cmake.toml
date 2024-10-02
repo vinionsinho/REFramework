@@ -14,6 +14,7 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /MP")
 set(ASMJIT_STATIC ON CACHE BOOL "" FORCE)
 set(DYNAMIC_LOADER ON CACHE BOOL "" FORCE) # OpenXR
 set(BUILD_TOOLS OFF CACHE BOOL "" FORCE) # DirectXTK
+set(SAFETYHOOK_FETCH_ZYDIS ON)
 
 if ("${CMAKE_BUILD_TYPE}" MATCHES "Release")
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} /MT")
@@ -24,10 +25,11 @@ if ("${CMAKE_BUILD_TYPE}" MATCHES "Release")
     string(REGEX REPLACE "/MD" "/MT" CMAKE_C_FLAGS "${CMAKE_C_FLAGS}")
     string(REGEX REPLACE "/MD" "/MT" CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE}")
     string(REGEX REPLACE "/MD" "/MT" CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE}")
-
-    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded")
+    
     message(NOTICE "Building in Release mode")
 endif()
+
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 """
 
 [options]
@@ -43,6 +45,7 @@ REF_BUILD_RE8_SDK = false
 REF_BUILD_DMC5_SDK = false
 REF_BUILD_MHRISE_SDK = false
 REF_BUILD_SF6_SDK = false
+REF_BUILD_DD2_SDK = false
 REF_BUILD_FRAMEWORK = { value = true, comment = "Enable building the full REFramework" }
 REF_BUILD_DEPENDENCIES = { value = true, comment = "Enable building dependencies" }
 
@@ -60,6 +63,7 @@ build-re8-sdk = "REF_BUILD_RE8_SDK OR REF_BUILD_FRAMEWORK"
 build-dmc5-sdk = "REF_BUILD_DMC5_SDK OR REF_BUILD_FRAMEWORK"
 build-mhrise-sdk = "REF_BUILD_MHRISE_SDK OR REF_BUILD_FRAMEWORK"
 build-sf6-sdk = "REF_BUILD_SF6_SDK OR REF_BUILD_FRAMEWORK"
+build-dd2-sdk = "REF_BUILD_DD2_SDK OR REF_BUILD_FRAMEWORK"
 build-framework-dependencies = "REF_BUILD_DEPENDENCIES AND CMAKE_SIZEOF_VOID_P EQUAL 8"
 
 [fetch-content.asmjit]
@@ -117,13 +121,16 @@ include-directories = [
 ]
 condition = "build-framework-dependencies"
 
+[fetch-content.safetyhook]
+git = "https://github.com/cursey/safetyhook"
+tag = "b046e123dc69821f2c375161e0adef3c6d9c9db4"
 
 [target.imgui]
 type = "static"
 sources = ["dependencies/imgui/*.cpp"]
 include-directories = ["dependencies/imgui", "src/re2-imgui"]
 compile-definitions = [
-    "IMGUI_USER_CONFIG=\"${CMAKE_SOURCE_DIR}/src/re2-imgui/re2_imconfig.hpp\"",
+    "IMGUI_USER_CONFIG=\"${CMAKE_CURRENT_SOURCE_DIR}/src/re2-imgui/re2_imconfig.hpp\"",
 ]
 condition = "build-framework"
 
@@ -132,7 +139,7 @@ type = "static"
 sources = ["dependencies/imguizmo/*.cpp"]
 include-directories = ["dependencies/imgui", "dependencies/imguizmo", "src/re2-imgui"]
 compile-definitions = [
-    "IMGUI_USER_CONFIG=\"${CMAKE_SOURCE_DIR}/src/re2-imgui/re2_imconfig.hpp\"",
+    "IMGUI_USER_CONFIG=\"${CMAKE_CURRENT_SOURCE_DIR}/src/re2-imgui/re2_imconfig.hpp\"",
 ]
 condition = "build-framework"
 
@@ -147,7 +154,7 @@ link-libraries = ["imgui"]
 type = "interface"
 include-directories = ["dependencies/openvr/headers"]
 link-libraries = [
-    "${CMAKE_SOURCE_DIR}/dependencies/openvr/lib/win64/openvr_api.lib",
+    "${CMAKE_CURRENT_SOURCE_DIR}/dependencies/openvr/lib/win64/openvr_api.lib",
 ]
 cmake-after = """
 file(COPY dependencies/openvr/lib/win64/openvr_api.lib DESTINATION ${CMAKE_BINARY_DIR}/lib)
@@ -177,17 +184,18 @@ tag = "v1.34.10"
 
 [fetch-content.kananlib]
 git = "https://github.com/cursey/kananlib"
-tag = "main"
+tag = "cca66766b139994f478ea48befd67a179b7310ab"
 
 [target.utility]
 type = "static"
 sources = ["shared/utility/**.cpp", "shared/utility/**.c"]
 headers = ["shared/utility/**.hpp", "shared/utility/**.h"]
 compile-options = ["/EHa"]
-compile-features = ["cxx_std_20"]
+compile-features = ["cxx_std_23"]
 link-libraries = [
     "spdlog",
     "minhook",
+    "safetyhook",
     "kananlib"
 ]
 
@@ -197,7 +205,7 @@ sources = ["shared/sdk/**.cpp", "shared/sdk/**.c"]
 headers = ["shared/sdk/**.hpp", "shared/sdk/**.h"]
 include-directories = ["shared/", "include/"]
 compile-options = ["/EHa"]
-compile-features = ["cxx_std_20"]
+compile-features = ["cxx_std_23"]
 link-libraries = [
     "glm_static",
     "spdlog"
@@ -214,7 +222,7 @@ headers = ["src/**.hpp", "src/**.h"]
 include-directories = ["shared/", "src/", "include/", "${OPENXR_SOURCE_DIR}/src"]
 link-directories = ["dependencies/openvr/lib/win64/"]
 compile-options = ["/GS-", "/bigobj", "/EHa"]
-compile-features = ["cxx_std_20"]
+compile-features = ["cxx_std_23"]
 compile-definitions = ["${CMKR_TARGET}", "REFRAMEWORK_EXPORTS", "REFRAMEWORK_GAME_NAME=\"${CMKR_TARGET}\""]
 developer-mode.compile-definitions = ["DEVELOPER"]
 link-libraries = [
@@ -239,10 +247,17 @@ link-libraries = [
     "DirectXTK12",
     "pdperfmod"
 ]
+cmake-after="""
+add_custom_command(
+    TARGET ${CMKR_TARGET} PRE_BUILD
+    COMMAND ${CMAKE_COMMAND} -E echo "Generating commit hash..."
+    COMMAND ${CMAKE_COMMAND} -E chdir ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/MakeCommitHash.bat
+)
+"""
 
 [template.game.properties]
 OUTPUT_NAME = "dinput8"
-LINK_FLAGS = "/DELAYLOAD:openvr_api.dll /DELAYLOAD:openxr_loader.dll /DELAYLOAD:PDPerfPlugin.dll"
+LINK_FLAGS = "/DELAYLOAD:openvr_api.dll /DELAYLOAD:openxr_loader.dll /DELAYLOAD:PDPerfPlugin.dll /DELAYLOAD:d3d11.dll /DELAYLOAD:d3d12.dll /DELAYLOAD:D3DCOMPILER_47.dll"
 RUNTIME_OUTPUT_DIRECTORY_RELEASE = "${CMAKE_BINARY_DIR}/bin/${CMKR_TARGET}"
 RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO = "${CMAKE_BINARY_DIR}/bin/${CMKR_TARGET}"
 LIBRARY_OUTPUT_DIRECTORY_RELEASE = "${CMAKE_BINARY_DIR}/lib/${CMKR_TARGET}"
@@ -338,10 +353,18 @@ condition = "build-sf6-sdk"
 [target.SF6]
 type = "game"
 
+[target.DD2SDK]
+type = "sdk"
+compile-definitions = ["DD2", "REENGINE_PACKED", "REENGINE_AT"]
+condition = "build-dd2-sdk"
+
+[target.DD2]
+type = "game"
+
 [template.plugin]
 type = "shared"
 include-directories = ["include/"]
-compile-features = ["cxx_std_20"]
+compile-features = ["cxx_std_23"]
 condition = "build-framework"
 
 [template.plugin.properties]

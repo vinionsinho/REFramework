@@ -1,4 +1,5 @@
 #include <imgui.h>
+#include <imgui_internal.h>
 #include <imnodes.h>
 
 #include "../ScriptRunner.hpp"
@@ -9,6 +10,16 @@
 #include "ImGui.hpp"
 
 namespace api::imgui {
+int32_t g_disabled_counts{0};
+
+void cleanup() {
+    for (auto i = 0; i < g_disabled_counts; ++i) {
+        ImGui::EndDisabled();
+    }
+
+    g_disabled_counts = 0;
+}
+
 ImVec2 create_imvec2(sol::object obj) {
     ImVec2 out{ 0.0f, 0.0f };
 
@@ -63,12 +74,14 @@ ImVec4 create_imvec4(sol::object obj) {
     return out;
 };
 
-bool button(const char* label) {
+bool button(const char* label, sol::object size_object) {
     if (label == nullptr) {
         label = "";
     }
 
-    return ImGui::Button(label);
+    const auto size = create_imvec2(size_object);
+
+    return ImGui::Button(label, size);
 }
 
 bool small_button(const char* label) {
@@ -489,7 +502,25 @@ void end_rect(sol::object additional_size_obj, sol::object rounding_obj) {
     maxs.x += additional_size;
     maxs.y += additional_size;
 
-    ImGui::GetWindowDrawList()->AddRect(mins, maxs, ImGui::GetColorU32(ImGuiCol_Border), ImGui::GetStyle().FrameRounding, ImDrawCornerFlags_All, 1.0f);
+    ImGui::GetWindowDrawList()->AddRect(mins, maxs, ImGui::GetColorU32(ImGuiCol_Border), ImGui::GetStyle().FrameRounding, ImDrawFlags_RoundCornersAll, 1.0f);
+}
+
+void begin_disabled(sol::object disabled_obj) {
+    bool disabled{true};
+
+    if (disabled_obj.is<bool>()) {
+        disabled = disabled_obj.as<bool>();
+    }
+
+    ++g_disabled_counts;
+    ImGui::BeginDisabled(disabled);
+}
+
+void end_disabled() {
+    if (g_disabled_counts > 0) {
+        --g_disabled_counts;
+        ImGui::EndDisabled();
+    }
 }
 
 void separator() {
@@ -1104,6 +1135,28 @@ float calc_item_width() {
     return ImGui::CalcItemWidth();
 }
 
+void item_size(sol::object pos, sol::object size, sol::object text_baseline_y) {
+    if (text_baseline_y.is<float>()) {
+        ImGui::ItemSize(ImRect{create_imvec2(pos), create_imvec2(size)}, text_baseline_y.as<float>());
+    } else {
+        ImGui::ItemSize(ImRect{create_imvec2(pos), create_imvec2(size)});
+    }
+}
+
+bool item_add(const char* label, sol::object pos, sol::object size) {
+    if (label == nullptr) {
+        label = "";
+    }
+
+    const auto window = ImGui::GetCurrentWindow();
+
+    if (window == nullptr) {
+        return false;
+    }
+
+    return ImGui::ItemAdd(ImRect{create_imvec2(pos), create_imvec2(size)}, window->GetID(label));
+}
+
 void push_style_color(int style_color, sol::object color_obj) {
     if (color_obj.is<int>()) {
         ImGui::PushStyleColor((ImGuiCol)style_color, (ImU32)color_obj.as<int>());
@@ -1185,6 +1238,14 @@ void set_clipboard(sol::object data) {
 
 const char* get_clipboard() {
     return ImGui::GetClipboardText();
+}
+
+void progress_bar(float progress, sol::object size, const char* overlay ){
+    if (overlay == nullptr) {
+        overlay = "";
+    }
+
+    ImGui::ProgressBar(progress, create_imvec2(size), overlay);
 }
 
 bool begin_table(const char* str_id, int column, sol::object flags_obj, sol::object outer_size_obj, sol::object inner_width_obj) {
@@ -1281,6 +1342,69 @@ void table_set_bg_color_vec4(ImGuiTableBgTarget target, Vector4f color, sol::obj
 
 ImGuiTableSortSpecs* table_get_sort_specs() {
     return ImGui::TableGetSortSpecs();
+}
+
+// Window Drawlist
+void draw_list_path_clear() {
+    if (auto dl = ImGui::GetWindowDrawList(); dl != nullptr) {
+        dl->PathClear();
+    }
+}
+
+void draw_list_path_line_to(sol::object pos_obj) {
+    auto pos = create_imvec2(pos_obj);
+    if (auto dl = ImGui::GetWindowDrawList(); dl != nullptr) {
+        dl->PathLineTo(pos);
+    }
+}
+
+void draw_list_path_stroke(ImU32 color, bool closed, float thickness) {
+    if (auto dl = ImGui::GetWindowDrawList(); dl != nullptr) {
+        dl->PathStroke(color, closed, thickness);
+    }
+}
+} // namespace api::imgui
+
+// Scroll APIs
+namespace api::imgui {
+float get_scroll_x() {
+    return ImGui::GetScrollX();
+}
+
+float get_scroll_y() {
+    return ImGui::GetScrollY();
+}
+
+void set_scroll_x(float scroll_x) {
+    ImGui::SetScrollX(scroll_x);
+}
+
+void set_scroll_y(float scroll_y) {
+    ImGui::SetScrollY(scroll_y);
+}
+
+float get_scroll_max_x() {
+    return ImGui::GetScrollMaxX();
+}
+
+float get_scroll_max_y() {
+    return ImGui::GetScrollMaxY();
+}
+
+void set_scroll_here_x(float center_x_ratio = 0.5f) {
+    ImGui::SetScrollHereX(center_x_ratio);
+}
+
+void set_scroll_here_y(float center_y_ratio = 0.5f) {
+    ImGui::SetScrollHereY(center_y_ratio);
+}
+
+void set_scroll_from_pos_x(float local_x, float center_x_ratio = 0.5f) {
+    ImGui::SetScrollFromPosX(local_x, center_x_ratio);
+}
+
+void set_scroll_from_pos_y(float local_y, float center_y_ratio = 0.5f) {
+    ImGui::SetScrollFromPosY(local_y, center_y_ratio);
 }
 } // namespace api::imgui
 
@@ -1909,6 +2033,8 @@ void bindings::open_imgui(ScriptState* s) {
     imgui["end_group"] = api::imgui::end_group;
     imgui["begin_rect"] = api::imgui::begin_rect;
     imgui["end_rect"] = api::imgui::end_rect;
+    imgui["begin_disabled"] = api::imgui::begin_disabled;
+    imgui["end_disabled"] = api::imgui::end_disabled;
     imgui["separator"] = api::imgui::separator;
     imgui["spacing"] = api::imgui::spacing;
     imgui["new_line"] = api::imgui::new_line;
@@ -1964,10 +2090,15 @@ void bindings::open_imgui(ScriptState* s) {
     imgui["end_menu"] = api::imgui::end_menu;
     imgui["menu_item"] = api::imgui::menu_item;
     imgui["get_display_size"] = api::imgui::get_display_size;
+
+    // Item
     imgui["push_item_width"] = api::imgui::push_item_width;
     imgui["pop_item_width"] = api::imgui::pop_item_width;
     imgui["set_next_item_width"] = api::imgui::set_next_item_width;
     imgui["calc_item_width"] = api::imgui::calc_item_width;
+    imgui["item_add"] = api::imgui::item_add;
+    imgui["item_size"] = api::imgui::item_size;
+
     imgui["push_style_color"] = api::imgui::push_style_color;
     imgui["pop_style_color"] = api::imgui::pop_style_color;
     imgui["push_style_var"] = api::imgui::push_style_var;
@@ -1980,6 +2111,25 @@ void bindings::open_imgui(ScriptState* s) {
     imgui["set_item_default_focus"] = api::imgui::set_item_default_focus;
     imgui["set_clipboard"] = api::imgui::set_clipboard;
     imgui["get_clipboard"] = api::imgui::get_clipboard;
+    imgui["progress_bar"] = api::imgui::progress_bar;
+
+    // Draw list
+    imgui["draw_list_path_clear"] = api::imgui::draw_list_path_clear;
+    imgui["draw_list_path_line_to"] = api::imgui::draw_list_path_line_to;
+    imgui["draw_list_path_stroke"] = api::imgui::draw_list_path_stroke;
+    
+    // SCROLL APIs
+    imgui["get_scroll_x"] = api::imgui::get_scroll_x;
+    imgui["get_scroll_y"] = api::imgui::get_scroll_y;
+    imgui["set_scroll_x"] = api::imgui::set_scroll_x;
+    imgui["set_scroll_y"] = api::imgui::set_scroll_y;
+    imgui["get_scroll_max_x"] = api::imgui::get_scroll_max_x;
+    imgui["get_scroll_max_y"] = api::imgui::get_scroll_max_y;
+    imgui["set_scroll_here_x"] = api::imgui::set_scroll_here_x;
+    imgui["set_scroll_here_y"] = api::imgui::set_scroll_here_y;
+    imgui["set_scroll_from_pos_x"] = api::imgui::set_scroll_from_pos_x;
+    imgui["set_scroll_from_pos_y"] = api::imgui::set_scroll_from_pos_y;
+
 
     // TABLE APIS
     imgui["begin_table"] = api::imgui::begin_table;

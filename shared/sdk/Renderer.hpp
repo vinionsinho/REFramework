@@ -7,6 +7,7 @@
 #include "ReClass.hpp"
 #include "RENativeArray.hpp"
 #include "renderer/RenderResource.hpp"
+#include "renderer/PipelineState.hpp"
 #include "intrusive_ptr.hpp"
 #include "ManagedObject.hpp"
 
@@ -42,11 +43,7 @@ template<typename T>
 class DirectXResource : public RenderResource {
 public:
     T* get_native_resource() const {
-    #if TDB_VER > 67
-        return *(ID3D12Resource**)((uintptr_t)this + 0x10);
-    #else
-        return *(ID3D12Resource**)((uintptr_t)this + 0x18);
-    #endif
+        return *(T**)((uintptr_t)this + sizeof(RenderResource));
     }
 
 private:
@@ -85,7 +82,7 @@ public:
     }
 
     Desc* get_desc() {
-        return (Desc*)((uintptr_t)this + sizeof(RenderResource) + sizeof(void*));
+        return (Desc*)((uintptr_t)this + s_desc_offset);
     }
 
     DirectXResource<ID3D12Resource>* get_d3d12_resource_container() {
@@ -93,14 +90,28 @@ public:
     }
 
 private:
-#if TDB_VER >= 71
+#if TDB_VER >= 73 || defined(SF6)
+    static constexpr inline auto s_desc_offset = sizeof(RenderResource) + 0x18;
+#else
+    static constexpr inline auto s_desc_offset = sizeof(RenderResource) + sizeof(void*);
+#endif
+
+#if TDB_VER >= 73
+    static constexpr inline auto s_d3d12_resource_offset = 0xB8;
+#elif TDB_VER >= 71
+#ifdef SF6
+    // So because this discrepancy in SF6 is > 8 bytes (which is how much was added to RenderResource), trying to automate this
+    // is a bit trickier so we can look into this later, and just hardcode it for now.
+    static constexpr inline auto s_d3d12_resource_offset = 0xB8;
+#else
     static constexpr inline auto s_d3d12_resource_offset = 0xA0;
+#endif
 #elif TDB_VER == 70
     static constexpr inline auto s_d3d12_resource_offset = 0x98;
 #elif TDB_VER == 69
     static constexpr inline auto s_d3d12_resource_offset = 0x98;
 #else
-    // TODO? might not be right offset
+    // TODO? might not be right offset (verified in DMC5)
     static constexpr inline auto s_d3d12_resource_offset = 0x98;
 #endif
 };
@@ -124,29 +135,11 @@ public:
         return m_desc;
     }
 
-    sdk::intrusive_ptr<Texture>& get_texture_d3d12() const {
-        return *(sdk::intrusive_ptr<Texture>*)((uintptr_t)this + s_texture_d3d12_offset);
-    }
-
-    sdk::intrusive_ptr<TargetState>& get_target_state_d3d12() const {
-        return *(sdk::intrusive_ptr<TargetState>*)((uintptr_t)this + s_target_state_d3d12_offset);
-    }
+    sdk::intrusive_ptr<Texture>& get_texture_d3d12() const;
+    sdk::intrusive_ptr<TargetState>& get_target_state_d3d12() const;
 
 private:
     Desc m_desc;
-
-#if TDB_VER == 71
-    static constexpr inline auto s_texture_d3d12_offset = 0x98;
-#elif TDB_VER == 70
-    static constexpr inline auto s_texture_d3d12_offset = 0x90;
-#elif TDB_VER == 69
-    static constexpr inline auto s_texture_d3d12_offset = 0x88;
-#elif TDB_VER <= 67
-    // TODO: 66 and below
-    static constexpr inline auto s_texture_d3d12_offset = 0x88;
-#endif
-
-    static constexpr inline auto s_target_state_d3d12_offset = s_texture_d3d12_offset - sizeof(void*);
 };
 
 static_assert(sizeof(RenderTargetView::Desc) == 0x14);
@@ -189,9 +182,6 @@ public:
 
 public:
     struct Desc {
-#if TDB_VER <= 67
-        void* _unk_pad;
-#endif
         sdk::intrusive_ptr<RenderTargetView>* rtvs;
         sdk::intrusive_ptr<DepthStencilView> dsv;
         uint32_t num_rtv;
@@ -201,8 +191,14 @@ public:
 
     // more here but not needed... for now
 };
-#if TDB_VER > 67
+#if TDB_VER >= 73
+static_assert(offsetof(TargetState, m_desc) + offsetof(TargetState::Desc, num_rtv) == 0x28);
+#elif TDB_VER > 67
+#ifdef SF6
+static_assert(offsetof(TargetState, m_desc) + offsetof(TargetState::Desc, num_rtv) == 0x28);
+#else
 static_assert(offsetof(TargetState, m_desc) + offsetof(TargetState::Desc, num_rtv) == 0x20);
+#endif
 #else
 static_assert(offsetof(TargetState, m_desc) + offsetof(TargetState::Desc, num_rtv) == 0x28);
 #endif
@@ -242,6 +238,7 @@ public:
     std::vector<layer::Scene*> find_fully_rendered_scene_layers();
     
     RenderLayer* get_parent();
+    void set_parent(RenderLayer* layer);
     RenderLayer* find_parent(::REType* layer_type);
     RenderLayer* clone(bool recursive = false);
     void clone(RenderLayer* other, bool recursive = false);
@@ -412,13 +409,16 @@ public:
     }
 
 private:
-#if TDB_VER >= 71
+    // Man I REALLY need a way of automatically finding this.
+#if TDB_VER >= 73
+    static constexpr inline auto s_output_state_offset = 0x118;
+#elif TDB_VER >= 71
     // verify for other games, this is for RE4
     static constexpr inline auto s_output_state_offset = 0x108;
 #elif TDB_VER >= 69
     static constexpr inline auto s_output_state_offset = 0xF8;
 #else
-    static constexpr inline auto s_output_state_offset = 0xF8; // TODO! VERIFY!
+    static constexpr inline auto s_output_state_offset = 0xE0; // Verified for DMC5
 #endif
 };
 
@@ -531,10 +531,31 @@ struct Fence : public FenceBase {
 };
 
 static_assert(sizeof(command::Fence) == 0x30);
+
+struct CopyBase : public Base {
+    sdk::renderer::RenderResource* src{};
+    sdk::renderer::RenderResource* dst{};
+    ::sdk::renderer::Fence fence{};
+};
+
+struct CopyTexture : public CopyBase {
+    int32_t src_subresource{-1};
+    int32_t dst_subresource{-1};
+};
+
+static_assert(sizeof(CopyBase) == 0x30);
+static_assert(sizeof(CopyTexture) == 0x38);
 }
 
 class RenderContext {
 public:
+    void set_pipeline_state(PipelineState* state);
+
+    // tgx and y are usually width and height
+    void dispatch_ray(uint32_t thread_group_x, uint32_t thread_group_y, uint32_t thread_group_z, Fence& fence);
+    void dispatch_32bit_constant(uint32_t thread_group_x, uint32_t thread_group_y, uint32_t thread_group_z, uint32_t constant, bool disable_uav_barrier);
+    void dispatch(uint32_t thread_group_x, uint32_t thread_group_y, uint32_t thread_group_z, bool disable_uav_barrier);
+
     // via::render::command::TypeId, can change between engine versions
     command::Base* alloc(uint32_t t, uint32_t size);
     void clear_rtv(sdk::renderer::RenderTargetView* rtv, float color[4], bool delay = false);
@@ -542,6 +563,7 @@ public:
         float color[4]{0.0f, 0.0f, 0.0f, 0.0f};
         clear_rtv(rtv, color, delay);
     }
+
     void copy_texture(Texture* dest, Texture* src, Fence& fence);
     void copy_texture(Texture* dest, Texture* src) {
         Fence fence{};
@@ -575,6 +597,12 @@ public:
 
 class Renderer {
 public:
+    void* get_device() const {
+        return *(void**)((uintptr_t)this + sizeof(void*)); // simple!
+    }
+
+    std::optional<uint32_t> get_render_frame() const;
+    
     ConstantBuffer* get_constant_buffer(std::string_view name) const;
 
     ConstantBuffer* get_scene_info() const {

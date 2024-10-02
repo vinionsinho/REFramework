@@ -1,8 +1,13 @@
+#include <windows.h>
+#include <dbghelp.h>
+
 #include <shared_mutex>
 #include <spdlog/spdlog.h>
 
 #include "utility/Scan.hpp"
 #include "utility/Module.hpp"
+#include "utility/Exceptions.hpp"
+#include <utility/ScopeGuard.hpp>
 
 #include "reframework/API.hpp"
 #include "ReClass.hpp"
@@ -13,16 +18,26 @@ namespace sdk {
     VM** VM::s_global_context{ nullptr };
     sdk::InvokeMethod* VM::s_invoke_tbl{nullptr};
     VM::ThreadContextFn VM::s_get_thread_context{ nullptr };
+    bool VM::s_fully_updated_pointers{false};
     int32_t VM::s_static_tbl_offset{ 0 };
     int32_t VM::s_type_db_offset{ 0 };
 
     sdk::VM* VM::get() {
         update_pointers();
+
+        if (s_global_context == nullptr) {
+            return nullptr;
+        }
+
         return *s_global_context;
     }
 
     REThreadContext* VM::get_thread_context(int32_t unk /*= -1*/) {
         update_pointers();
+
+        if (s_get_thread_context == nullptr) {
+            return nullptr;
+        }
 
         return s_get_thread_context(this, unk);
     }
@@ -61,6 +76,13 @@ namespace sdk {
 
     void VM::update_pointers() {
         {
+            // Originally this was always locking the lock in read mode
+            // however that was WAY too much which was reducing performance
+            // so just checking this bool is enough.
+            if (s_fully_updated_pointers) {
+                return;
+            }
+
             // Lock a shared lock for the s_mutex
             std::shared_lock lock(s_mutex);
 
@@ -71,6 +93,11 @@ namespace sdk {
 
         // Create a unique lock for the s_mutex as we get to the meat of the function
         std::unique_lock lock{ s_mutex };
+
+        utility::ScopeGuard sg{ [&]() {
+                s_fully_updated_pointers = s_global_context != nullptr && s_get_thread_context != nullptr;
+            } 
+        };
 
         spdlog::info("[VM::update_pointers] Updating...");
 
@@ -130,21 +157,31 @@ namespace sdk {
             return;
         }
 
-        s_global_context = (decltype(s_global_context))utility::calculate_absolute(*ref + context_pattern->ctx_offset);
-        s_get_thread_context = (decltype(s_get_thread_context))utility::calculate_absolute(*ref + context_pattern->get_thread_context_offset);
+        const auto potential_context = (decltype(s_global_context))utility::calculate_absolute(*ref + context_pattern->ctx_offset);
+        bool found_tdb = false;
+
+        if (*potential_context == nullptr) {
+            spdlog::info("[VM::update_pointers] Context is null.");
+            return;
+        }
+
+        sdk::RETypeDB* tdb = nullptr;
 
         for (auto i = 0; i < 0x20000; i += sizeof(void*)) {
-            auto ptr = *(sdk::RETypeDB**)((uintptr_t)*s_global_context + i);
+            auto ptr = *(sdk::RETypeDB**)((uintptr_t)*potential_context + i);
 
             if (ptr == nullptr || IsBadReadPtr(ptr, sizeof(void*)) || ((uintptr_t)ptr & (sizeof(void*) - 1)) != 0) {
                 continue;
             }
 
             if (*(uint32_t*)ptr == *(uint32_t*)"TDB") {
+                tdb = ptr; 
                 const auto version = *(uint32_t*)((uintptr_t)ptr + 4);
 
+                s_tdb_version = version;
                 s_type_db_offset = i;
                 s_static_tbl_offset = s_type_db_offset - 0x30; // hope this holds true for the older gameS!!!!!!!!!!!!!!!!!!!
+                found_tdb = true;
                 spdlog::info("[VM::update_pointers] s_type_db_offset: {:x}", s_type_db_offset);
                 spdlog::info("[VM::update_pointers] s_static_tbl_offset: {:x}", s_static_tbl_offset);
                 spdlog::info("[VM::update_pointers] TDB Version: {}", version);
@@ -153,8 +190,75 @@ namespace sdk {
             }
         }
 
+        if (!found_tdb) {
+            spdlog::error("[VM::update_pointers] Unable to find TDB inside VM");
+            return;
+        }
+
+        s_global_context = potential_context;
+        s_get_thread_context = (decltype(s_get_thread_context))utility::calculate_absolute(*ref + context_pattern->get_thread_context_offset);
+
         spdlog::info("[VM::update_pointers] s_global_context: {:x}", (uintptr_t)s_global_context);
         spdlog::info("[VM::update_pointers] s_get_thread_context: {:x}", (uintptr_t)s_get_thread_context);
+
+        // Needed on TDB73/AJ. The 0x30 offset we have is not correct, so we need to find the correct one
+        // And the "correct" one is the first one that doesn't look like a BS pointer (crude, i know)
+        // so... TODO: find a better way to do this
+#if TDB_VER >= 71
+        if (s_global_context != nullptr && *s_global_context != nullptr) {
+            auto static_tbl = (REStaticTbl**)((uintptr_t)*s_global_context + s_static_tbl_offset);
+            bool found_static_tbl_offset = false;
+            const auto before_static_tbl_size = *(uint32_t*)((uintptr_t)static_tbl + sizeof(void*));
+            spdlog::info("[VM::update_pointers] Static table size (before): {}", *(uint32_t*)((uintptr_t)static_tbl + sizeof(void*)));
+            if (IsBadReadPtr(*static_tbl, sizeof(void*)) || ((uintptr_t)*static_tbl & (sizeof(void*) - 1)) != 0 || before_static_tbl_size > 9999999 || before_static_tbl_size < 2000) {
+                spdlog::info("[VM::update_pointers] Static table offset is bad, correcting...");
+
+                // We are looking for the two arrays, the static field table, and the static field "initialized table"
+                // The initialized table tells whether a specific entry in the static field table has been initialized or not
+                // so they both should have the same size, easy to find
+                for (auto i = sizeof(void*); i < 0x100; i+= sizeof(void*)) try {
+                    const auto& ptr = *(REStaticTbl**)((uintptr_t)*s_global_context + (s_type_db_offset - i));
+
+                    if (IsBadReadPtr(ptr, sizeof(void*)) || ((uintptr_t)ptr & (sizeof(void*) - 1)) != 0) {
+                        continue;
+                    }
+
+                    spdlog::info("[VM::update_pointers] Examining {:x}", (uintptr_t)ptr);
+
+                    const auto& potential_count = *(uint32_t*)((uintptr_t)&ptr + sizeof(void*));
+
+                    if (potential_count < 2000) {
+                        continue;
+                    }
+
+                    constexpr auto array_size = (sizeof(void*) * 2);
+                    const auto previous_offset = s_type_db_offset - i - array_size;
+                    const auto& previous_ptr = *(REStaticTbl**)((uintptr_t)*s_global_context + previous_offset);
+                    const auto& previous_count = *(uint32_t*)((uintptr_t)&previous_ptr + sizeof(void*));
+
+                    if (previous_count == potential_count) {
+                        spdlog::info("[VM::update_pointers] Found static table at {:x} (offset {:x})", (uintptr_t)ptr, previous_offset);
+                        s_static_tbl_offset = previous_offset;
+                        found_static_tbl_offset = true;
+                        break;
+                    }
+                } catch (...) {
+                    continue;
+                }
+            } else {
+                found_static_tbl_offset = true;
+            }
+
+            // Just make it return null if we can't find it
+            // We do this so the consumer can do while(sdk::VM::get() != nullptr) { ... } to wait for everything to be valid
+            if (!found_static_tbl_offset) {
+                spdlog::error("[VM::update_pointers] Unable to find static table offset.");
+                s_global_context = nullptr;
+                s_get_thread_context = nullptr;
+                return;
+            }
+        }
+#endif
 
         // Get invoke_tbl
         // this SEEMS to work on RE2 and onwards, but not on RE7
@@ -168,6 +272,111 @@ namespace sdk {
         std::vector<std::string> invoke_patterns {
             "40 53 48 83 ec 20 48 8b 41 30 4c 8b d2 48 8b 51 40 48 8b d9 4c 8b 00 48 8b 41 10", // RE2 - MHRise v1
             "40 53 48 83 ec 20 48 8b 41 10 48 8b da 8b 48 08", // MHRise Sunbreak/newer games?
+            "40 53 48 83 EC ? 48 8B 41 30 4C 8B D2 4C 8B 49 10 48 8B D9 48 8B 51 40 49 8B CA 4C 8B 00 41 FF" // seen in game pass RE2
+        };
+
+        // ok so if these patterns above are failing, we can find the invoke table by looking for these set of instructions:
+        // 8D 56 FF                                      lea     edx, [rsi-1]
+        // 48 8B CF                                      mov     rcx, rdi
+        // E8 67 FD 6C 01                                call    sub_[removed]
+
+        // Then, scroll up from here, and you'll see something that looks like this:
+        /*
+        E8 D4 D6 6C 01                                call    sub_[removed]
+        41 B8 53 15 00 00                             mov     r8d, 1553h ; dead giveaway is a number like this that is the size of the invoke table
+        48 8D 15 37 C7 6B 06                          lea     rdx, g_invokeTbl ; this is what we want
+        48 8B 08                                      mov     rcx, [rax]
+        48 8B 05 2D 47 86 06                          mov     rax, cs:off_[removed]
+        48 89 08                                      mov     [rax], rcx
+        48 8B CF                                      mov     rcx, rdi
+        */
+
+        auto alternative_invoke_scan = [&]() -> bool {
+            auto tdb_references = utility::scan_displacement_references(mod, (uintptr_t)tdb);
+
+            if (tdb_references.empty()) {
+                spdlog::info("[VM::update_pointers] Unable to find TDB references.");
+                return false;
+            }
+
+            for (const auto& ref : tdb_references) {
+                const auto fn_start = utility::find_function_start(ref);
+
+                if (!fn_start) {
+                    continue;
+                }
+
+                spdlog::info("[VM::update_pointers] Disassembling function at {:x}", *fn_start);
+
+                bool found = false;
+
+                utility::exhaustive_decode((uint8_t*)*fn_start, 1000, [&](utility::ExhaustionContext& ctx) -> utility::ExhaustionResult {
+                    if (found) {
+                        return utility::ExhaustionResult::BREAK;
+                    }
+
+                    if (std::string_view{ctx.instrux.Mnemonic} == "CALL") {
+                        return utility::ExhaustionResult::STEP_OVER;
+                    }
+
+                    if (std::string_view{ctx.instrux.Mnemonic} != "LEA") {
+                        return utility::ExhaustionResult::CONTINUE;
+                    }
+
+                    const auto disp = utility::resolve_displacement(ctx.addr);
+
+                    if (!disp) {
+                        return utility::ExhaustionResult::CONTINUE;
+                    }
+
+                    try {
+                        uintptr_t* functions = (uintptr_t*)*disp;
+
+                        // First pointer must always be null
+                        if (functions[0] != 0) {
+                            return utility::ExhaustionResult::CONTINUE;
+                        }
+
+                        // Rest of pointers are not null and point somewhere within the game module
+                        for (auto i = 1; i < 100; ++i) {
+                            if (functions[i] == 0 || IsBadReadPtr(&functions[i], sizeof(void*))) {
+                                return utility::ExhaustionResult::CONTINUE;
+                            }
+
+                            if (utility::get_module_within(functions[i]).value_or(nullptr) != mod) {
+                                return utility::ExhaustionResult::CONTINUE;
+                            }
+
+                            /*const auto ptr_fn_start = utility::find_function_start(functions[i]);
+
+                            if (!ptr_fn_start) {
+                                return utility::ExhaustionResult::CONTINUE;
+                            }
+
+                            if (*ptr_fn_start != functions[i]) {
+                                break;
+                            }*/
+                        }
+
+                        s_invoke_tbl = (sdk::InvokeMethod*)functions;
+                        found = true;
+
+                        spdlog::info("[VM::update_pointers] s_invoke_tbl: {:x}", (uintptr_t)s_invoke_tbl);
+
+                        return utility::ExhaustionResult::BREAK;
+                    } catch (...) {
+                        return utility::ExhaustionResult::CONTINUE;
+                    }
+
+                    return utility::ExhaustionResult::CONTINUE;
+                });
+
+                if (found) {
+                    return true;
+                }
+            }
+
+            return false;
         };
 
         std::optional<uintptr_t> method_inside_invoke_tbl{std::nullopt};
@@ -180,8 +389,39 @@ namespace sdk {
                 break;
             }
         }
+
         if (!method_inside_invoke_tbl) {
-            spdlog::info("[VM::update_pointers] Unable to find method inside invoke table.");
+            spdlog::info("[VM::update_pointers] Unable to find method inside invoke table. Trying fallback scan...");
+            const auto anchor = utility::scan(mod, "8D 56 FF 48 8B CF E8 ? ? ? ?");
+
+            if (!anchor) {
+                spdlog::info("[VM::update_pointers] Unable to find anchor for invoke table, trying alternative scan...");
+
+                if (!alternative_invoke_scan()) {
+                    spdlog::info("[VM::update_pointers] Unable to find invoke table.");
+                    return;
+                }
+
+                return;
+            }
+
+            const auto lea_rdx = utility::scan_reverse(*anchor, 0x100, "48 8D 15 ? ? ? ?");
+
+            if (!lea_rdx) {
+                spdlog::info("[VM::update_pointers] Unable to find lea rdx for invoke table.");
+
+                if (!alternative_invoke_scan()) {
+                    spdlog::info("[VM::update_pointers] Unable to find invoke table.");
+                    return;
+                }
+
+                return;
+            }
+
+            s_invoke_tbl = (sdk::InvokeMethod*)utility::resolve_displacement(*lea_rdx).value_or(0);
+
+            spdlog::info("[VM::update_pointers] s_invoke_tbl: {:x}", (uintptr_t)s_invoke_tbl);
+
             return;
         }
 
@@ -191,6 +431,12 @@ namespace sdk {
 
         if (!ptr_inside_invoke_tbl) {
             spdlog::info("[VM::update_pointers] Unable to find ptr inside invoke table.");
+
+            if (!alternative_invoke_scan()) {
+                spdlog::info("[VM::update_pointers] Unable to find invoke table.");
+                return;
+            }
+
             return;
         }
 
@@ -219,12 +465,17 @@ namespace sdk {
     }
 
     static std::shared_mutex s_pointers_mtx{};
+    static bool s_fully_updated_vm_context_pointers{false};
     static void* (*s_context_unhandled_exception_fn)(::REThreadContext*) = nullptr;
     static void* (*s_context_local_frame_gc_fn)(::REThreadContext*) = nullptr;
     static void* (*s_context_end_global_frame_fn)(::REThreadContext*) = nullptr;
 
     void sdk::VMContext::update_pointers() {
         {
+            if (s_fully_updated_vm_context_pointers) {
+                return;
+            }
+
             std::shared_lock _{s_pointers_mtx};
 
             if (s_context_unhandled_exception_fn != nullptr && s_context_local_frame_gc_fn != nullptr && s_context_end_global_frame_fn != nullptr) {
@@ -233,6 +484,10 @@ namespace sdk {
         }
         
         std::unique_lock _{s_pointers_mtx};
+
+        utility::ScopeGuard sg{[] {
+            s_fully_updated_vm_context_pointers = true;
+        }};
 
         spdlog::info("Locating funcs");
         
@@ -336,9 +591,37 @@ namespace sdk {
         spdlog::info("VMContext: Caught exception code {:x}", code);
 
         switch (code) {
-        case EXCEPTION_ACCESS_VIOLATION:
-            spdlog::info("VMContext: Attempting to handle access violation.");
+        case EXCEPTION_ACCESS_VIOLATION: {
+            spdlog::info("VMContext: Attempting to handle access violation. Attempting to dump callstack...");
 
+            spdlog::error("RIP: {:x}", exc->ContextRecord->Rip);
+            spdlog::error("RSP: {:x}", exc->ContextRecord->Rsp);
+            spdlog::error("RCX: {:x}", exc->ContextRecord->Rcx);
+            spdlog::error("RDX: {:x}", exc->ContextRecord->Rdx);
+            spdlog::error("R8: {:x}", exc->ContextRecord->R8);
+            spdlog::error("R9: {:x}", exc->ContextRecord->R9);
+            spdlog::error("R10: {:x}", exc->ContextRecord->R10);
+            spdlog::error("R11: {:x}", exc->ContextRecord->R11);
+            spdlog::error("R12: {:x}", exc->ContextRecord->R12);
+            spdlog::error("R13: {:x}", exc->ContextRecord->R13);
+            spdlog::error("R14: {:x}", exc->ContextRecord->R14);
+            spdlog::error("R15: {:x}", exc->ContextRecord->R15);
+            spdlog::error("RAX: {:x}", exc->ContextRecord->Rax);
+            spdlog::error("RBX: {:x}", exc->ContextRecord->Rbx);
+            spdlog::error("RBP: {:x}", exc->ContextRecord->Rbp);
+            spdlog::error("RSI: {:x}", exc->ContextRecord->Rsi);
+            spdlog::error("RDI: {:x}", exc->ContextRecord->Rdi);
+            spdlog::error("EFLAGS: {:x}", exc->ContextRecord->EFlags);
+            spdlog::error("CS: {:x}", exc->ContextRecord->SegCs);
+            spdlog::error("DS: {:x}", exc->ContextRecord->SegDs);
+            spdlog::error("ES: {:x}", exc->ContextRecord->SegEs);
+            spdlog::error("FS: {:x}", exc->ContextRecord->SegFs);
+            spdlog::error("GS: {:x}", exc->ContextRecord->SegGs);
+            spdlog::error("SS: {:x}", exc->ContextRecord->SegSs);
+
+            utility::exceptions::dump_callstack(exc);
+
+        } break;
         default:
             break;
         }
@@ -384,7 +667,15 @@ namespace sdk {
 
     ::REManagedObject* VM::create_sbyte(int8_t value)  {
         static auto sbyte_type = ::sdk::find_type_definition("System.SByte");
-        static auto value_field = sbyte_type->get_field("mValue");
+        static auto value_field = [&]() {
+            auto f = sbyte_type->get_field("mValue");
+            if (f == nullptr) {
+                f = sbyte_type->get_field("m_value");
+            }
+
+            return f;
+        }();
+
         auto new_obj = sbyte_type->create_instance_full();
 
         if (new_obj == nullptr) {
@@ -397,7 +688,14 @@ namespace sdk {
 
     ::REManagedObject* VM::create_byte(uint8_t value) {
         static auto byte_type = ::sdk::find_type_definition("System.Byte");
-        static auto value_field = byte_type->get_field("mValue");
+        static auto value_field = [&]() {
+            auto f = byte_type->get_field("mValue");
+            if (f == nullptr) {
+                f = byte_type->get_field("m_value");
+            }
+
+            return f;
+        }();
         auto new_obj = byte_type->create_instance_full();
 
         if (new_obj == nullptr) {
@@ -410,7 +708,15 @@ namespace sdk {
 
     ::REManagedObject* VM::create_int16(int16_t value) {
         static auto int16_type = ::sdk::find_type_definition("System.Int16");
-        static auto value_field = int16_type->get_field("mValue");
+        static auto value_field = [&]() {
+            auto f = int16_type->get_field("mValue");
+            if (f == nullptr) {
+                f = int16_type->get_field("m_value");
+            }
+
+            return f;
+        }();
+
         auto new_obj = int16_type->create_instance_full();
 
         if (new_obj == nullptr) {
@@ -423,7 +729,15 @@ namespace sdk {
 
     ::REManagedObject* VM::create_uint16(uint16_t value) {
         static auto uint16_type = ::sdk::find_type_definition("System.UInt16");
-        static auto value_field = uint16_type->get_field("mValue");
+        static auto value_field = [&]() {
+            auto f = uint16_type->get_field("mValue");
+            if (f == nullptr) {
+                f = uint16_type->get_field("m_value");
+            }
+
+            return f;
+        }();
+        
         auto new_obj = uint16_type->create_instance_full();
 
         if (new_obj == nullptr) {
@@ -436,7 +750,15 @@ namespace sdk {
 
     ::REManagedObject* VM::create_int32(int32_t value) {
         static auto int32_type = ::sdk::find_type_definition("System.Int32");
-        static auto value_field = int32_type->get_field("mValue");
+        static auto value_field = [&]() {
+            auto f = int32_type->get_field("mValue");
+            if (f == nullptr) {
+                f = int32_type->get_field("m_value");
+            }
+
+            return f;
+        }();
+
         auto new_obj = int32_type->create_instance_full();
 
         if (new_obj == nullptr) {
@@ -449,7 +771,15 @@ namespace sdk {
 
     ::REManagedObject* VM::create_uint32(uint32_t value) {
         static auto uint32_type = ::sdk::find_type_definition("System.UInt32");
-        static auto value_field = uint32_type->get_field("mValue");
+        static auto value_field = [&]() {
+            auto f = uint32_type->get_field("mValue");
+            if (f == nullptr) {
+                f = uint32_type->get_field("m_value");
+            }
+
+            return f;
+        }();
+
         auto new_obj = uint32_type->create_instance_full();
 
         if (new_obj == nullptr) {
@@ -462,7 +792,15 @@ namespace sdk {
 
     ::REManagedObject* VM::create_int64(int64_t value) {
         static auto int64_type = ::sdk::find_type_definition("System.Int64");
-        static auto value_field = int64_type->get_field("mValue");
+        static auto value_field = [&]() {
+            auto f = int64_type->get_field("mValue");
+            if (f == nullptr) {
+                f = int64_type->get_field("m_value");
+            }
+
+            return f;
+        }();
+
         auto new_obj = int64_type->create_instance_full();
 
         if (new_obj == nullptr) {
@@ -475,7 +813,15 @@ namespace sdk {
 
     ::REManagedObject* VM::create_uint64(uint64_t value) {
         static auto uint64_type = ::sdk::find_type_definition("System.UInt64");
-        static auto value_field = uint64_type->get_field("mValue");
+        static auto value_field = [&]() {
+            auto f = uint64_type->get_field("mValue");
+            if (f == nullptr) {
+                f = uint64_type->get_field("m_value");
+            }
+
+            return f;
+        }();
+
         auto new_obj = uint64_type->create_instance_full();
 
         if (new_obj == nullptr) {
@@ -489,7 +835,15 @@ namespace sdk {
 
     ::REManagedObject* VM::create_single(float value) {
         static auto float_type = ::sdk::find_type_definition("System.Single");
-        static auto value_field = float_type->get_field("mValue");
+        static auto value_field = [&]() {
+            auto f = float_type->get_field("mValue");
+            if (f == nullptr) {
+                f = float_type->get_field("m_value");
+            }
+
+            return f;
+        }();
+
         auto new_obj = float_type->create_instance_full();
 
         if (new_obj == nullptr) {
@@ -502,7 +856,15 @@ namespace sdk {
 
     ::REManagedObject* VM::create_double(double value) {
         static auto double_type = ::sdk::find_type_definition("System.Double");
-        static auto value_field = double_type->get_field("mValue");
+        static auto value_field = [&]() {
+            auto f = double_type->get_field("mValue");
+            if (f == nullptr) {
+                f = double_type->get_field("m_value");
+            }
+
+            return f;
+        }();
+
         auto new_obj = double_type->create_instance_full();
 
         if (new_obj == nullptr) {

@@ -42,6 +42,7 @@ class VM : public regenny::via::clr::VM {
 class VM {
 #endif
 public:
+    static inline uint32_t s_tdb_version{0};
     static VM* get();
 
 public:
@@ -74,6 +75,7 @@ private:
     static sdk::InvokeMethod* s_invoke_tbl;
     static ThreadContextFn s_get_thread_context;
 
+    static bool s_fully_updated_pointers;
     static int32_t s_static_tbl_offset;
     static int32_t s_type_db_offset;
 };

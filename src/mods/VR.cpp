@@ -9,6 +9,7 @@
 #include <utility/ScopeGuard.hpp>
 
 #include <sdk/TDBVer.hpp>
+#include <reframework/API.hpp>
 
 #if TDB_VER <= 49
 #include "sdk/regenny/re7/via/Window.hpp"
@@ -29,6 +30,9 @@
 #elif defined(RE4)
 #include "sdk/regenny/re4/via/Window.hpp"
 #include "sdk/regenny/re4/via/SceneView.hpp"
+#elif defined(DD2)
+#include "sdk/regenny/dd2/via/Window.hpp"
+#include "sdk/regenny/dd2/via/SceneView.hpp"
 #else
 #include "sdk/regenny/mhrise_tdb71/via/Window.hpp"
 #include "sdk/regenny/mhrise_tdb71/via/SceneView.hpp"
@@ -48,6 +52,7 @@
 #include "utility/Module.hpp"
 #include "utility/Memory.hpp"
 #include "utility/Registry.hpp"
+#include "utility/ScopeGuard.hpp"
 
 #include "FirstPerson.hpp"
 #include "ManualFlashlight.hpp"
@@ -77,6 +82,18 @@ std::optional<regenny::via::Size> g_previous_size{};
 
 // Purpose: spoof the render target size to the size of the HMD displays
 void VR::on_view_get_size(REManagedObject* scene_view, float* result) {
+    // There are some very dumb optimizations that cause set_DisplayType
+    // to go through this hook. This function is actually something like "updateSceneView"
+    static thread_local bool already_inside = false;
+
+    if (already_inside) {
+        return;
+    }
+
+    already_inside = true;
+
+    utility::ScopeGuard _{ [&]() { already_inside = false; } };
+
     if (!g_framework->is_ready()) {
         return;
     }
@@ -93,7 +110,7 @@ void VR::on_view_get_size(REManagedObject* scene_view, float* result) {
     auto window = regenny_view->window;
 
     static auto via_scene_view = sdk::find_type_definition("via.SceneView");
-    static auto set_display_type_method = via_scene_view->get_method("set_DisplayType");
+    static auto set_display_type_method = via_scene_view != nullptr ? via_scene_view->get_method("set_DisplayType") : nullptr;
 
     // Force the display to stretch to the window size
     if (set_display_type_method != nullptr) {
@@ -191,7 +208,7 @@ void VR::on_view_get_size(REManagedObject* scene_view, float* result) {
         wanted_height = (float)window_height;
 
         // Might be usable in other games too
-#if defined(SF6)
+#if defined(SF6) || TDB_VER >= 73
         if (!is_gng) {
             window->borderless_size.w = (float)window_width;
             window->borderless_size.h = (float)window_height;
@@ -208,11 +225,25 @@ void VR::on_view_get_size(REManagedObject* scene_view, float* result) {
     // spoof the size to the HMD's size
     if (!TemporalUpscaler::get()->activated()) {
         if (!is_using_multipass()) {
+    #if TDB_VER < 73
             result[0] = wanted_width;
             result[1] = wanted_height;
+    #else
+            // Stupid optimizations cause the game to not use the result variant of this function
+            // but rather update the current scene view's size directly.
+            regenny_view->size.w = wanted_width;
+            regenny_view->size.h = wanted_height;
+    #endif
         } else {
+    #if TDB_VER < 73
             result[0] = wanted_width - 1.0f;
             result[1] = wanted_height - 1.0f;
+    #else
+            // Stupid optimizations cause the game to not use the result variant of this function
+            // but rather update the current scene view's size directly.
+            regenny_view->size.w = wanted_width - 1.0f;
+            regenny_view->size.h = wanted_height - 1.0f;
+    #endif
         }
     }
 }
@@ -319,7 +350,7 @@ void VR::on_camera_get_view_matrix(REManagedObject* camera, Matrix4x4f* result) 
     //}
 }
 
-HookManager::PreHookResult VR::pre_set_hdr_mode(std::vector<uintptr_t>& args, std::vector<sdk::RETypeDefinition*>& arg_tys) {
+HookManager::PreHookResult VR::pre_set_hdr_mode(std::vector<uintptr_t>& args, std::vector<sdk::RETypeDefinition*>& arg_tys, uintptr_t ret_addr) {
     if (!VR::get()->is_hmd_active()) {
         return HookManager::PreHookResult::CALL_ORIGINAL;
     }
@@ -629,7 +660,7 @@ bool VR::on_pre_scene_layer_update(sdk::renderer::layer::Scene* layer, void* ren
 void VR::on_scene_layer_update(sdk::renderer::layer::Scene* layer, void* render_ctx) {
     REF_PROFILE_FUNCTION();
 
-    ScopeGuard ___([&]() {
+    utility::ScopeGuard ___([&]() {
         m_scene_update_mtx.unlock();
     });
 
@@ -783,7 +814,7 @@ float VR::get_sharpness_hook(void* tonemapping) {
 */
 
 // Called when the mod is initialized
-std::optional<std::string> VR::on_initialize() try {
+std::optional<std::string> VR::on_initialize_d3d_thread() try {
     auto openvr_error = initialize_openvr();
 
     if (openvr_error || !m_openvr->loaded) {
@@ -1318,6 +1349,8 @@ std::optional<std::string> VR::hijack_resolution() {
 
 std::optional<std::string> VR::hijack_input() {
 #if defined(RE2) || defined(RE3)
+    spdlog::info("[VR] Hijacking InputSystem");
+
     // We're going to hook InputSystem.update so we can
     // override the analog stick values with the VR controller's
     auto func = sdk::find_native_method(game_namespace("InputSystem"), "update");
@@ -1340,6 +1373,8 @@ std::optional<std::string> VR::hijack_input() {
 }
 
 std::optional<std::string> VR::hijack_camera() {
+    spdlog::info("[VR] Hijacking Camera");
+
     const auto get_projection_matrix = (uintptr_t)sdk::find_native_method("via.Camera", "get_ProjectionMatrix");
 
     ///////////////////////////////
@@ -1375,6 +1410,9 @@ std::optional<std::string> VR::hijack_camera() {
 std::optional<std::string> VR::hijack_wwise_listeners() {
 #ifndef RE4
 #ifndef SF6
+#if TDB_VER < 73
+    spdlog::info("[VR] Hijacking WwiseListener");
+
     const auto t = sdk::find_type_definition("via.wwise.WwiseListener");
 
     if (t == nullptr) {
@@ -1405,13 +1443,15 @@ std::optional<std::string> VR::hijack_wwise_listeners() {
 
     const auto vtable_index = *(uint8_t*)(*jmp + 3) / sizeof(void*);
     spdlog::info("via.wwise.WwiseListener.update vtable index: {}", vtable_index);
+    spdlog::info("Attempting to create fake via.wwise.WwiseListener instance");
 
     const void* fake_obj = t->create_instance_full();
 
     if (fake_obj == nullptr) {
         return "VR init failed: Failed to create fake via.wwise.WwiseListener instance.";
     }
-
+    
+    spdlog::info("Attempting to read vtable from fake via.wwise.WwiseListener instance");
     auto obj_vtable = *(void***)fake_obj;
 
     if (obj_vtable == nullptr) {
@@ -1433,6 +1473,7 @@ std::optional<std::string> VR::hijack_wwise_listeners() {
     if (!g_wwise_listener_update_hook->create()) {
         return "VR init failed: via.wwise.WwiseListener update native function hook failed.";
     }
+#endif
 #endif
 #endif
 
@@ -1554,23 +1595,15 @@ void VR::update_hmd_state() {
     // Update the poses used for the game
     // If we used the data directly from the WaitGetPoses call, we would have to lock a different mutex and wait a long time
     // This is because the WaitGetPoses call is blocking, and we don't want to block any game logic
-    {
-        if (runtime->wants_reset_origin && runtime->ready()) {
-            std::unique_lock _{ runtime->pose_mtx };
+    if (runtime->wants_reset_origin && runtime->ready() && runtime->got_first_valid_poses) {
+        std::unique_lock _{ runtime->pose_mtx };
+        set_rotation_offset(glm::identity<glm::quat>());
+        m_standing_origin = get_position_unsafe(vr::k_unTrackedDeviceIndex_Hmd);
 
-            set_rotation_offset(glm::identity<glm::quat>());
-            m_standing_origin = get_position_unsafe(vr::k_unTrackedDeviceIndex_Hmd);
-
-            runtime->wants_reset_origin = false;
-        }
+        runtime->wants_reset_origin = false;
     }
 
     runtime->update_matrices(m_nearz, m_farz);
-
-    // On first run, set the standing origin to the headset position
-    if (!runtime->got_first_poses) {
-        m_standing_origin = get_position(vr::k_unTrackedDeviceIndex_Hmd);
-    }
 
     runtime->got_first_poses = true;
 
@@ -2734,14 +2767,8 @@ bool VR::on_pre_gui_draw_element(REComponent* gui_element, void* primitive_conte
 
 #ifdef RE7
         if (name_hash == "HUD"_fnv) { // not a hero
-            game_object->transform->worldTransform = Matrix4x4f{ 
-                3.0f, 0.0f, 0.0f, 0.0f,
-                0.0f, 3.0f, 0.0f, 0.0f,
-                0.0f, 0.0f, 3.0f, 0.0f,
-                0.0f, 0.0f, 0.0f, 1.0f
-            };
-
-            return true;
+            // Stops HUD element from being stuck to the screen
+            sdk::call_object_func<REComponent*>(gui_element, "set_RenderTarget", context, gui_element, nullptr);
         }
 #endif
 
@@ -3396,6 +3423,7 @@ void VR::on_end_rendering(void* entry) {
             const auto scene_layers = m_camera_duplicator.get_relevant_scene_layers();
 
             if (scene_layers.size() < 2) {
+                spdlog::warn("VR: on_end_rendering: scene layers are less than 2: {}", scene_layers.size());
                 return;
             }
 
@@ -3407,6 +3435,7 @@ void VR::on_end_rendering(void* entry) {
             };
 
             if (prepare_output_layers[0] == nullptr || prepare_output_layers[1] == nullptr) {
+                spdlog::warn("VR: on_end_rendering: prepare output layers are null: {:x} {:x}", (uintptr_t)prepare_output_layers[0], (uintptr_t)prepare_output_layers[1]);
                 return;
             }
 
@@ -3416,6 +3445,7 @@ void VR::on_end_rendering(void* entry) {
             };
 
             if (output_states[0] == nullptr || output_states[1] == nullptr) {
+                spdlog::warn("VR: on_end_rendering: output states are null: {:x} {:x}", (uintptr_t)output_states[0], (uintptr_t)output_states[1]);
                 return;
             }
 
@@ -3436,7 +3466,11 @@ void VR::on_end_rendering(void* entry) {
                             m_multipass.allocated_size[1] = get_hmd_height();
 
                             spdlog::info("Allocated native res copies");
+                        } else {
+                            spdlog::warn("VR: on_end_rendering: texs are null: {:x} {:x}", (uintptr_t)tex0.get(), (uintptr_t)tex1.get());
                         }
+                    } else {
+                        spdlog::warn("VR: on_end_rendering: rtvs are null: {:x} {:x}", (uintptr_t)rtv0.get(), (uintptr_t)rtv1.get());
                     }
                 }
 
@@ -3486,6 +3520,7 @@ void VR::on_end_rendering(void* entry) {
                 "UpdateMovie", // Causes movies to play twice as fast if ran again
                 "UpdateSpeedTree",
                 "UpdateHansoft",
+                "UpdatePuppet",
                 // The dynamics stuff causes a cloth physics step in the right eye
                 "BeginRenderingDynamics",
                 "BeginDynamics",
@@ -3493,7 +3528,9 @@ void VR::on_end_rendering(void* entry) {
                 "EndDynamics",
                 "EndPhysics",
                 "RenderDynamics",
+#ifndef DD2
                 "RenderLandscape",
+#endif
                 "DevelopRenderer",
                 "DrawWidget"
             };

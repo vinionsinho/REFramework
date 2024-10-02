@@ -69,6 +69,9 @@ REFrameworkPluginFunctions g_plugin_functions {
     reframework::is_drawing_ui,
     reframework_create_script_state, 
     reframework_destroy_script_state,
+
+    reframework_on_imgui_frame,
+    reframework_on_imgui_draw_ui,
 };
 
 REFrameworkSDKFunctions g_sdk_functions {
@@ -167,17 +170,17 @@ REFrameworkSDKFunctions g_sdk_functions {
         return (REFrameworkManagedObjectHandle)sdk::VM::create_managed_string(utility::widen(str));
     },
     [](REFrameworkMethodHandle fn, REFPreHookFn pre_fn, REFPostHookFn post_fn, bool ignore_jmp) -> unsigned int {
-        return g_hookman.add((sdk::REMethodDefinition*)fn, [pre_fn](auto& args, auto& arg_tys) {
+        return g_hookman.add((sdk::REMethodDefinition*)fn, [pre_fn](auto& args, auto& arg_tys, uintptr_t ret_addr) {
                 if (pre_fn != nullptr) {
                     return (HookManager::PreHookResult)pre_fn((int)args.size(),
-                        (void**)args.data(), (REFrameworkTypeDefinitionHandle*)arg_tys.data());
+                        (void**)args.data(), (REFrameworkTypeDefinitionHandle*)arg_tys.data(), ret_addr);
                 } else {
                     return (HookManager::PreHookResult)REFRAMEWORK_HOOK_CALL_ORIGINAL;
                 }
             },
-            [post_fn](auto& ret_val, auto* ret_ty) {
+            [post_fn](auto& ret_val, auto* ret_ty, uintptr_t ret_addr) {
                 if (post_fn != nullptr) {
-                    post_fn((void**)&ret_val, (REFrameworkTypeDefinitionHandle)ret_ty);
+                    post_fn((void**)&ret_val, (REFrameworkTypeDefinitionHandle)ret_ty, ret_addr);
                 }
             },
             ignore_jmp);
@@ -304,17 +307,10 @@ REFrameworkTDBMethod g_tdb_method_data {
             return REFRAMEWORK_ERROR_IN_ARGS_SIZE_MISMATCH;
         }
 
-        std::vector<void*> cpp_args{};
+        const auto arg_count = in_args_size / sizeof(void*);
+        m->invoke(thisptr, std::span<void*>(in_args, arg_count), *(reframework::InvokeRet*)out);
 
-        for (auto i = 0; i < in_args_size / sizeof(void*); i++) {
-            cpp_args.push_back(in_args[i]);
-        }
-
-        auto ret = m->invoke(thisptr, cpp_args);
-
-        memcpy(out, &ret, sizeof(reframework::InvokeRet));
-
-        if (ret.exception_thrown) {
+        if (((reframework::InvokeRet*)out)->exception_thrown) {
             return REFRAMEWORK_ERROR_EXCEPTION;
         }
 
@@ -375,6 +371,8 @@ REFrameworkTDBField g_tdb_field_data {
 
     [](REFrameworkFieldHandle field) { return REFIELD(field)->get_init_data(); },
     [](REFrameworkFieldHandle field, void* obj, bool is_value_type) { return REFIELD(field)->get_data_raw(obj, is_value_type); },
+
+    [](REFrameworkFieldHandle field) { return REFIELD(field)->get_index(); },
 };
 
 REFrameworkTDBProperty g_tdb_property_data {
@@ -712,7 +710,7 @@ std::optional<std::string> PluginLoader::on_initialize() {
             continue;
         }
 
-        if (required_version.patch > g_plugin_version.patch) {
+        if (required_version.patch > g_plugin_version.patch && required_version.minor == g_plugin_version.minor) {
             spdlog::warn("[PluginLoader] Plugin {} desires a newer patch version", name);
             m_plugin_load_warnings.emplace(name, "Desires a newer patch version");
         }
@@ -887,4 +885,21 @@ bool reframework_on_message(REFOnMessageCb cb) {
     }
 
     return APIProxy::get()->add_on_message(cb);
+}
+
+bool reframework_on_imgui_frame(REFOnImGuiFrameCb cb) {
+    if (cb == nullptr) {
+        return false;
+    }
+
+    return APIProxy::get()->add_on_imgui_frame(cb);
+}
+
+
+bool reframework_on_imgui_draw_ui(REFOnImGuiFrameCb cb) {
+    if (cb == nullptr) {
+        return false;
+    }
+
+    return APIProxy::get()->add_on_imgui_draw_ui(cb);
 }

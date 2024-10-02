@@ -6,6 +6,7 @@
 #include <utility/Memory.hpp>
 #include <utility/Profiler.hpp>
 
+#include "sdk/GUIPrimitiveSystem.hpp"
 #include "sdk/Application.hpp"
 
 #include "Hooks.hpp"
@@ -207,7 +208,9 @@ std::optional<std::string> Hooks::hook_update_transform() {
     m_update_transform_hook = std::make_unique<FunctionHook>(update_transform, &update_transform_hook);
 
     if (!m_update_transform_hook->create()) {
-        return "Failed to hook UpdateTransform";
+        //return "Failed to hook UpdateTransform";
+        spdlog::error("Failed to hook UpdateTransform");
+        return std::nullopt; // who cares
     }
 
     return std::nullopt;
@@ -561,13 +564,18 @@ std::optional<std::string> Hooks::hook_view_get_size() {
     spdlog::info("via.SceneView.get_Size: {:x}", (uintptr_t)get_size_func);
 
     // Pattern scan for the native function call
-    auto ref = utility::scan((uintptr_t)get_size_func, 0x100, "49 8B C8 E8");
+    //auto ref = utility::scan((uintptr_t)get_size_func, 0x100, "49 8B C8 E8");
+    auto ref = utility::find_pattern_in_path((uint8_t*)get_size_func, 1000, false, "49 8B C8 E8");
+
+    if (!ref) {
+        ref = utility::find_pattern_in_path((uint8_t*)get_size_func, 1000, false, "48 8B CB E8");
+    }
 
     if (!ref) {
         return "Hook init failed: via.SceneView.get_Size native function not found. Pattern scan failed.";
     }
 
-    auto native_func = utility::calculate_absolute(*ref + 4);
+    auto native_func = utility::calculate_absolute(ref->addr + 4);
 
     // Hook the native function
     m_view_get_size_hook = std::make_unique<FunctionHook>(native_func, view_get_size_hook);
@@ -591,13 +599,17 @@ std::optional<std::string> Hooks::hook_camera_get_projection_matrix() {
     spdlog::info("via.Camera.get_ProjectionMatrix: {:x}", (uintptr_t)func);
     
     // Pattern scan for the native function call
-    auto ref = utility::scan((uintptr_t)func, 0x100, "49 8B C8 E8");
+    auto ref = utility::find_pattern_in_path((uint8_t*)func, 1000, false, "49 8B C8 E8");
+
+    if (!ref) {
+        ref = utility::find_pattern_in_path((uint8_t*)func, 1000, false, "48 8B CB E8");
+    }
 
     if (!ref) {
         return "Hook init failed: via.Camera.get_ProjectionMatrix native function not found. Pattern scan failed.";
     }
 
-    auto native_func = utility::calculate_absolute(*ref + 4);
+    auto native_func = utility::calculate_absolute(ref->addr + 4);
 
     // Hook the native function
     m_camera_get_projection_matrix_hook = std::make_unique<FunctionHook>(native_func, camera_get_projection_matrix_hook);
@@ -621,13 +633,17 @@ std::optional<std::string> Hooks::hook_camera_get_view_matrix() {
     spdlog::info("via.Camera.get_ViewMatrix: {:x}", (uintptr_t)func);
 
     // Pattern scan for the native function call
-    auto ref = utility::scan((uintptr_t)func, 0x100, "49 8B C8 E8");
+    auto ref = utility::find_pattern_in_path((uint8_t*)func, 1000, false, "49 8B C8 E8");
+
+    if (!ref) {
+        ref = utility::find_pattern_in_path((uint8_t*)func, 1000, false, "48 8B CB E8");
+    }
 
     if (!ref) {
         return "Hook init failed: via.Camera.get_ViewMatrix native function not found. Pattern scan failed.";
     }
 
-    auto native_func = utility::calculate_absolute(*ref + 4);
+    auto native_func = utility::calculate_absolute(ref->addr + 4);
 
     // Hook the native function
     m_camera_get_view_matrix_hook = std::make_unique<FunctionHook>(native_func, camera_get_view_matrix_hook);
@@ -861,12 +877,31 @@ void Hooks::global_application_entry_hook_internal(void* entry, const char* name
         return original(entry);
     }
 
-    {
+    const auto should_allow_ignore = sdk::VM::s_tdb_version >= 73 ?
+                                     (hash != 0x76b8100bec7c12c3 && hash != 0x9f63c0fc4eea6626) :
+                                     true;
+
+    if (should_allow_ignore) {
         std::shared_lock _{m_application_entry_data_mutex};
 
         if (m_ignored_application_entries.contains(hash)) {
             return;
         }
+    }
+
+    if (hash == "BeginRendering"_fnv) {
+#if TDB_VER >= 73
+    if (auto primitive_system = sdk::gui::renderer::PrimitiveSystem::get(); primitive_system != nullptr) {
+        auto primitive_buffer = primitive_system->get_primitive_buffer();
+        
+        if (primitive_buffer != nullptr) {
+            if (primitive_buffer->scratch.used >= primitive_buffer->scratch.size) {
+                spdlog::info("[GUI] Resizing scratch buffer from {} to {}", primitive_buffer->scratch.size, primitive_buffer->scratch.size * 2);
+                primitive_buffer->scratch.resize(primitive_buffer->scratch.size * 2);
+            }
+        }
+    }
+#endif
     }
 
     if (m_profiling_enabled) {

@@ -5,6 +5,7 @@
 #include <unordered_map>
 #include <memory>
 #include <mutex>
+#include <deque>
 #include <shared_mutex>
 
 #include <Windows.h>
@@ -154,7 +155,54 @@ public:
 
     void gc_data_changed(GarbageCollectionData data);
 
+    /*sol::table get_thread_storage(size_t hash) {
+        auto it = m_thread_storage.find(hash);
+        if (it == m_thread_storage.end()) {
+            it = m_thread_storage.emplace(hash, m_lua.create_table()).first;
+        }
+
+        return it->second;
+    }*/
+
+    void push_hook_storage(size_t thread_hash) {
+        auto it = m_hook_storage.find(thread_hash);
+        if (it == m_hook_storage.end()) {
+            it = m_hook_storage.emplace(thread_hash, std::deque<sol::table>{}).first;
+        }
+
+        it->second.push_back(m_lua.create_table());
+        m_current_hook_storage = it->second.back();
+    }
+
+    void pop_hook_storage(size_t thread_hash) {
+        auto it = m_hook_storage.find(thread_hash);
+        if (it != m_hook_storage.end()) {
+            if (!it->second.empty()) {
+                it->second.pop_back();
+            }
+        }
+
+        m_current_hook_storage = sol::nil;
+    }
+
+    sol::reference get_hook_storage() {
+        return m_current_hook_storage;
+    }
+
 private:
+    sol::reference get_hook_storage_internal(size_t thread_hash) {
+        //return m_current_hook_storage;
+
+        auto it = m_hook_storage.find(thread_hash);
+        if (it != m_hook_storage.end()) {
+            if (!it->second.empty()) {
+                return it->second.back();
+            }
+        }
+
+        return sol::nil;
+    }
+
     sol::state m_lua{};
 
     GarbageCollectionData m_gc_data{};
@@ -182,6 +230,9 @@ private:
 
     std::deque<HookDef> m_hooks_to_add{};
     std::unordered_map<sdk::REMethodDefinition*, std::vector<HookManager::HookId>> m_hooks{};
+
+    std::unordered_map<size_t, std::deque<sol::table>> m_hook_storage{};
+    sol::reference m_current_hook_storage{};
 };
 
 class ScriptRunner : public Mod {
@@ -287,6 +338,9 @@ private:
     std::shared_mutex m_script_error_mutex{};
     std::chrono::system_clock::time_point m_last_script_error_time{};
 
+    std::chrono::system_clock::time_point m_scene_check_time{};
+    bool m_checked_scene_once{false};
+    bool m_scene_okay{false};
     bool m_console_spawned{false};
     bool m_needs_first_reset{true};
     bool m_last_online_match_state{false};

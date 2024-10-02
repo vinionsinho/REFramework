@@ -6,6 +6,8 @@ class Resource;
 #pragma once
 
 #include <string_view>
+#include <optional>
+
 #include "ManagedObject.hpp"
 #include "intrusive_ptr.hpp"
 
@@ -24,11 +26,13 @@ private:
     static void update_pointers();
     static void (*s_add_ref_fn)(Resource*);
     static void (*s_release_fn)(Resource*);
+    static inline std::optional<size_t> s_refcount_offset{};
 };
 
 class ResourceManager {
 public:
     static ResourceManager* get();
+    static void update_pointers();
 
 public:
     sdk::Resource* create_resource(void* type_info, std::wstring_view name);
@@ -49,7 +53,6 @@ public:
 private:
     friend class sdk::Resource;
 
-    static void update_pointers();
     static sdk::Resource* (*s_create_resource_fn)(ResourceManager*, void*, const wchar_t*);
     static uintptr_t s_create_resource_reference;
 
